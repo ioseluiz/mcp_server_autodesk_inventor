@@ -1,0 +1,19 @@
+# Python
+mcp_server/__pycache__/
+mcp_server/venv/
+mcp_server/.env
+
+# .NET
+**/bin/
+**/obj/
+*.user
+*.suo
+*.sln.dotSettings.user
+
+# Project specific
+inventor_plugin/InventorMCPBridge.dll
+
+# AI assistant files
+GEMINI.md
+
+.vs/

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Addin Type="Standard">
+  <ClassId>{E1A5A5A5-A5A5-A5A5-A5A5-A5A5A5A5A5A5}</ClassId>
+  <ClientId>{E1A5A5A5-A5A5-A5A5-A5A5-A5A5A5A5A5A5}</ClientId>
+  <DisplayName>Inventor MCP Bridge</DisplayName>
+  <Description>Bridge between MCP Server and Autodesk Inventor</Description>
+  <Assembly>InventorMCPBridge.dll</Assembly>
+  <LoadOnStartUp>1</LoadOnStartUp>
+  <UserUnloadable>1</UserUnloadable>
+  <Hidden>0</Hidden>
+  <SupportedSoftwareVersionGreaterThan>27..</SupportedSoftwareVersionGreaterThan>
+  <DataVersion>1</DataVersion>
+</Addin>
