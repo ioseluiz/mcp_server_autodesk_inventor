@@ -10,7 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from fastmcp import FastMCP
-from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from fastmcp.server.http import StreamableHTTPASGIApp
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,23 +42,28 @@ if not USERS:
 current_user_id: ContextVar[str] = ContextVar("current_user_id")
 
 # =========================================================================
-# MCP — SSE transport wired directly as FastAPI routes.
-#
-# Using app.mount() caused Starlette to return Match.PARTIAL for sub-paths
-# under Mount("/"), which triggered redirect_slashes and produced a 307
-# redirect to /sse/.  Azure then issued a 301 HTTP→HTTPS redirect, losing
-# the request body.  Explicit FastAPI routes avoid all of this.
-#
-# GET  /sse       — Copilot Studio opens the MCP SSE stream here
-# POST /messages/ — Copilot Studio sends MCP messages here (session_id in QS)
+# MCP — Streamable HTTP transport (MCP spec 2025-03-26).
+# Copilot Studio uses Streamable HTTP transport (MCP 2025-03-26):
+#   POST /sse  — send MCP request, receive SSE or JSON response
+#   GET  /sse  — open SSE stream for server-pushed events
+#   DELETE /sse — close session
+# All three methods are handled by StreamableHTTPASGIApp via a single
+# @app.api_route so FastAPI creates a Route (Match.FULL, no redirects).
 # =========================================================================
 mcp = FastMCP("Autodesk Inventor 2024 Assistant")
-_sse = SseServerTransport("/messages/")
+
+_session_manager = StreamableHTTPSessionManager(
+    app=mcp._mcp_server,
+    event_store=None,
+    json_response=False,
+    stateless=False,
+)
+_streamable_app = StreamableHTTPASGIApp(_session_manager)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with mcp._lifespan_manager():
+    async with mcp._lifespan_manager(), _session_manager.run():
         yield
 
 
@@ -326,27 +332,11 @@ async def debug_last_sse():
     return _last_sse_request or {"info": "Ninguna request a /sse capturada aún."}
 
 
-@app.get("/sse")
-async def sse_endpoint(request: Request):
-    """MCP SSE endpoint — Copilot Studio connects here to discover and call tools."""
-    async with _sse.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
-        await mcp._mcp_server.run(
-            streams[0],
-            streams[1],
-            mcp._mcp_server.create_initialization_options(),
-        )
+@app.api_route("/sse", methods=["GET", "POST", "DELETE"])
+async def mcp_endpoint(request: Request):
+    """MCP Streamable HTTP endpoint — Copilot Studio uses POST to call tools."""
+    await _streamable_app(request.scope, request.receive, request._send)
     return Response()
-
-
-# =========================================================================
-# MONTAJE DEL HANDLER DE MENSAJES SSE
-# /messages/ must be a Mount (not a plain route) because SseServerTransport
-# uses it as a sub-application that routes by session_id query param.
-# This Mount goes LAST so all explicit routes above take precedence.
-# =========================================================================
-app.mount("/messages", _sse.handle_post_message)
 
 
 if __name__ == "__main__":
