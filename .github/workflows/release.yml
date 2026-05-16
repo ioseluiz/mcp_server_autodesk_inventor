@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore NuGet packages
+        run: dotnet restore inventor_plugin/InventorMCPBridge.sln
+
+      - name: Build plugin (Release x64)
+        run: >
+          msbuild inventor_plugin/InventorMCPBridge.sln
+          /p:Configuration=Release
+          /p:Platform=x64
+          /p:AssemblyVersion=${{ steps.version.outputs.VERSION }}
+          /p:FileVersion=${{ steps.version.outputs.VERSION }}
+
+      - name: Locate Inno Setup
+        id: inno
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          & "${{ steps.inno.outputs.ISCC }}" `
+            /DAppVersion="${{ steps.version.outputs.VERSION }}" `
+            installer\setup.iss
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Inventor MCP Bridge v${{ steps.version.outputs.VERSION }}"
+          files: installer/output/InventorMCPBridgeSetup-*.exe
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

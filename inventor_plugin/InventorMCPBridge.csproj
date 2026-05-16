@@ -20,9 +20,16 @@
     <Reference Include="System.Net.Http" />
   </ItemGroup>
 
+  <!-- Resolve Inventor Interop: use local installation if present, else fall back to lib/ (for CI) -->
+  <PropertyGroup>
+    <_InventorInteropSystem>C:\Program Files\Autodesk\Inventor 2024\Bin\Public Assemblies\Autodesk.Inventor.Interop.dll</_InventorInteropSystem>
+    <InventorInteropPath Condition="Exists('$(_InventorInteropSystem)')">$(_InventorInteropSystem)</InventorInteropPath>
+    <InventorInteropPath Condition="'$(InventorInteropPath)' == ''">$(MSBuildProjectDirectory)\..\lib\Autodesk.Inventor.Interop.dll</InventorInteropPath>
+  </PropertyGroup>
+
   <ItemGroup>
     <Reference Include="Autodesk.Inventor.Interop">
-      <HintPath>C:\Program Files\Autodesk\Inventor 2024\Bin\Public Assemblies\Autodesk.Inventor.Interop.dll</HintPath>
+      <HintPath>$(InventorInteropPath)</HintPath>
       <EmbedInteropTypes>False</EmbedInteropTypes>
       <Private>False</Private>
     </Reference>

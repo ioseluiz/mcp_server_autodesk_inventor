@@ -13,6 +13,11 @@ mcp_server/.env
 # Project specific
 inventor_plugin/InventorMCPBridge.dll
 
+# Installer output (compiled .exe artifacts)
+installer/output/
+
+# lib/ is tracked (contains Inventor Interop DLL for CI)
+
 # AI assistant files
 GEMINI.md
 
