@@ -47,7 +47,11 @@ current_user_id: ContextVar[str] = ContextVar("current_user_id")
 # MCP
 # =========================================================================
 mcp = FastMCP("Autodesk Inventor 2024 Assistant")
-mcp_app = mcp.http_app(path="/")
+
+# SSE transport: Copilot Studio connects via GET /sse (SSE stream) and sends
+# MCP messages via POST /messages/.  The previous Streamable-HTTP transport
+# (POST /sse with text/event-stream response) is incompatible with Copilot Studio.
+mcp_app = mcp.http_app(transport="sse")
 
 app = FastAPI(
     title="Inventor MCP Azure Hub",
@@ -72,6 +76,11 @@ async def auth_middleware(request: Request, call_next):
     # Sonda de salud de Azure y raíz son públicos.
     # OPTIONS pasa para que el middleware de CORS gestione preflight.
     if request.url.path in ["/", "/health"] or request.method == "OPTIONS":
+        return await call_next(request)
+
+    # /messages/ is the SSE message endpoint — the session_id in the query string
+    # provides implicit auth, so we don't require an API key here.
+    if request.url.path.startswith("/messages"):
         return await call_next(request)
 
     api_key = request.headers.get("x-api-key")
@@ -257,11 +266,10 @@ async def create_circle(center_x: float, center_y: float, radius: float) -> str:
 
 
 # =========================================================================
-# MONTAJE Y ENDPOINTS DE INFRAESTRUCTURA
+# ENDPOINTS DE INFRAESTRUCTURA
+# These must be registered BEFORE app.mount("/", …) so that Starlette's route
+# resolution finds them first (routes are matched in registration order).
 # =========================================================================
-app.mount("/sse", mcp_app)
-
-
 @app.get("/")
 async def root():
     return {"status": "online", "service": "Inventor MCP Azure Hub"}
@@ -278,6 +286,15 @@ async def health():
     """Health check para el plugin de Inventor (requiere API key vía middleware)."""
     caller = current_user_id.get(None)
     return {"status": "ok", "user_id": caller, "message": "Servidor MCP activo"}
+
+
+# =========================================================================
+# MONTAJE DEL SSE MCP — debe ir AL FINAL para que los routes de FastAPI
+# registrados arriba tengan prioridad en la resolución de rutas.
+#   GET  /sse       — Copilot Studio abre el stream SSE aquí
+#   POST /messages/ — Copilot Studio envía mensajes MCP aquí
+# =========================================================================
+app.mount("/", mcp_app)
 
 
 if __name__ == "__main__":
