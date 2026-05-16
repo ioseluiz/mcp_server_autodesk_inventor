@@ -91,15 +91,14 @@ async def auth_middleware(request: Request, call_next):
     if request.url.path.startswith("/messages"):
         return await call_next(request)
 
-    # Log all headers on /sse to diagnose Copilot Studio auth format
+    # Capture headers on /sse to diagnose Copilot Studio auth format
     if request.url.path == "/sse":
-        import logging
-        logging.warning(
-            "SSE request | method=%s | headers=%s | query=%s",
-            request.method,
-            dict(request.headers),
-            str(request.query_params),
-        )
+        _last_sse_request.clear()
+        _last_sse_request.update({
+            "method": request.method,
+            "headers": dict(request.headers),
+            "query_params": dict(request.query_params),
+        })
 
     # Accept API key from multiple locations for Copilot Studio compatibility:
     # 1. x-api-key header (C# plugin)
@@ -139,6 +138,9 @@ pending_tasks: Dict[str, Dict[str, Any]] = {}
 completed_tasks: Dict[str, Any] = {}
 task_events: Dict[str, asyncio.Event] = {}
 user_queues: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+# Captures the last request seen on /sse for auth diagnostics
+_last_sse_request: Dict[str, Any] = {}
 
 
 class TaskResult(BaseModel):
@@ -316,6 +318,12 @@ async def health():
     """Health check para el plugin de Inventor (requiere API key)."""
     caller = current_user_id.get(None)
     return {"status": "ok", "user_id": caller, "message": "Servidor MCP activo"}
+
+
+@app.get("/api/debug")
+async def debug_last_sse():
+    """Devuelve los headers de la última request recibida en /sse."""
+    return _last_sse_request or {"info": "Ninguna request a /sse capturada aún."}
 
 
 @app.get("/sse")
