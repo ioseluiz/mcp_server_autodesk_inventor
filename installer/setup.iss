@@ -59,7 +59,7 @@ begin
   ConfigPage.Add('API Key:', True);
   ConfigPage.Add('ID de usuario:', False);
 
-  ConfigPage.Values[0] := 'https://your-app.azurewebsites.net';
+  ConfigPage.Values[0] := '';
   ConfigPage.Values[1] := '';
   ConfigPage.Values[2] := '';
 end;
