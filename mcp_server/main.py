@@ -91,7 +91,33 @@ async def auth_middleware(request: Request, call_next):
     if request.url.path.startswith("/messages"):
         return await call_next(request)
 
-    api_key = request.headers.get("x-api-key")
+    # Log all headers on /sse to diagnose Copilot Studio auth format
+    if request.url.path == "/sse":
+        import logging
+        logging.warning(
+            "SSE request | method=%s | headers=%s | query=%s",
+            request.method,
+            dict(request.headers),
+            str(request.query_params),
+        )
+
+    # Accept API key from multiple locations for Copilot Studio compatibility:
+    # 1. x-api-key header (C# plugin)
+    # 2. Authorization: Bearer <key>
+    # 3. Authorization: <key>
+    # 4. api-key query param
+    def extract_api_key() -> Optional[str]:
+        k = request.headers.get("x-api-key")
+        if k:
+            return k
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:]
+        if auth:
+            return auth
+        return request.query_params.get("api-key") or request.query_params.get("api_key")
+
+    api_key = extract_api_key()
     user_id = USERS.get(api_key) if api_key else None
     if not user_id:
         return JSONResponse(
