@@ -109,7 +109,22 @@ namespace InventorMCPBridge.Services
                         result = UpdateParameter(task.Payload);
                         break;
                     case "export_step":
-                        result = ExportStep();
+                        result = ExportStep(task.Payload);
+                        break;
+                    case "render_screenshot":
+                        result = RenderScreenshot(task.Payload);
+                        break;
+                    case "export_to_stl":
+                        result = ExportToStl(task.Payload);
+                        break;
+                    case "export_to_dxf":
+                        result = ExportToDxf(task.Payload);
+                        break;
+                    case "check_interference":
+                        result = CheckInterference(task.Payload);
+                        break;
+                    case "get_mass_properties":
+                        result = GetMassProperties(task.Payload);
                         break;
                     case "create_line":
                         result = CreateLine(task.Payload);
@@ -330,18 +345,225 @@ namespace InventorMCPBridge.Services
             throw new Exception($"Parámetro '{name}' no encontrado");
         }
 
-        private object ExportStep()
+        private object ExportStep(Dictionary<string, object> payload)
         {
             Document doc = _inventorApp.ActiveDocument;
             if (doc == null) throw new Exception("No hay documento activo");
 
-            string tempPath  = System.IO.Path.GetTempPath();
-            string fileName  = System.IO.Path.GetFileNameWithoutExtension(doc.FullFileName);
+            string fileName = System.IO.Path.GetFileNameWithoutExtension(doc.FullFileName);
             if (string.IsNullOrEmpty(fileName)) fileName = "Export";
-            string stepPath  = System.IO.Path.Combine(tempPath, fileName + ".step");
 
-            doc.SaveAs(stepPath, true);
-            return new { Status = "ok", FilePath = stepPath, DocumentName = fileName };
+            string savePath = payload != null && payload.ContainsKey("path")
+                && !string.IsNullOrWhiteSpace(payload["path"]?.ToString())
+                ? payload["path"].ToString()
+                : System.IO.Path.Combine(System.IO.Path.GetTempPath(), fileName + ".step");
+
+            doc.SaveAs(savePath, true);
+
+            long fileSize = 0;
+            try { fileSize = new System.IO.FileInfo(savePath).Length; } catch { }
+
+            return new
+            {
+                Status        = "ok",
+                FilePath      = savePath,
+                FileSizeBytes = fileSize,
+                DocumentName  = doc.DisplayName,
+                DocumentType  = doc.DocumentType.ToString()
+            };
+        }
+
+        private object RenderScreenshot(Dictionary<string, object> payload)
+        {
+            Document doc = _inventorApp.ActiveDocument;
+            if (doc == null) throw new Exception("No hay documento activo");
+
+            int width  = payload != null && payload.ContainsKey("width")  ? Convert.ToInt32(payload["width"])  : 1280;
+            int height = payload != null && payload.ContainsKey("height") ? Convert.ToInt32(payload["height"]) : 720;
+
+            string tempBmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"inv_{Guid.NewGuid():N}.bmp");
+            string tempPng = System.IO.Path.ChangeExtension(tempBmp, ".png");
+
+            Color white = _inventorApp.TransientObjects.CreateColor(255, 255, 255);
+            Color black = _inventorApp.TransientObjects.CreateColor(0, 0, 0);
+            _inventorApp.ActiveView.Camera.SaveAsBitmap(tempBmp, width, height, white, black);
+
+            // Convert BMP → PNG for smaller base64 payload
+            using (var bmpImg = new System.Drawing.Bitmap(tempBmp))
+                bmpImg.Save(tempPng, System.Drawing.Imaging.ImageFormat.Png);
+
+            byte[] imageBytes = System.IO.File.ReadAllBytes(tempPng);
+            string base64    = Convert.ToBase64String(imageBytes);
+            try { System.IO.File.Delete(tempBmp); } catch { }
+            try { System.IO.File.Delete(tempPng); } catch { }
+
+            return new
+            {
+                Status       = "ok",
+                MimeType     = "image/png",
+                Width        = width,
+                Height       = height,
+                Base64Data   = base64,
+                DocumentName = doc.DisplayName,
+                FullFileName = doc.FullFileName
+            };
+        }
+
+        private object ExportToStl(Dictionary<string, object> payload)
+        {
+            Document doc = _inventorApp.ActiveDocument;
+            if (doc == null) throw new Exception("No hay documento activo");
+            if (!(doc is PartDocument) && !(doc is AssemblyDocument))
+                throw new Exception("STL solo se exporta desde piezas (.ipt) o ensambles (.iam).");
+
+            string fileName = System.IO.Path.GetFileNameWithoutExtension(doc.FullFileName);
+            if (string.IsNullOrEmpty(fileName)) fileName = "Export";
+
+            string savePath = payload != null && payload.ContainsKey("path")
+                && !string.IsNullOrWhiteSpace(payload["path"]?.ToString())
+                ? payload["path"].ToString()
+                : System.IO.Path.Combine(System.IO.Path.GetTempPath(), fileName + ".stl");
+
+            doc.SaveAs(savePath, true);
+
+            long fileSize = 0;
+            try { fileSize = new System.IO.FileInfo(savePath).Length; } catch { }
+
+            return new
+            {
+                Status        = "ok",
+                FilePath      = savePath,
+                FileSizeBytes = fileSize,
+                DocumentName  = doc.DisplayName,
+                DocumentType  = doc.DocumentType.ToString()
+            };
+        }
+
+        private object ExportToDxf(Dictionary<string, object> payload)
+        {
+            Document doc = _inventorApp.ActiveDocument;
+            if (doc == null) throw new Exception("No hay documento activo");
+
+            string fileName = System.IO.Path.GetFileNameWithoutExtension(doc.FullFileName);
+            if (string.IsNullOrEmpty(fileName)) fileName = "Export";
+
+            string savePath = payload != null && payload.ContainsKey("path")
+                && !string.IsNullOrWhiteSpace(payload["path"]?.ToString())
+                ? payload["path"].ToString()
+                : System.IO.Path.Combine(System.IO.Path.GetTempPath(), fileName + ".dxf");
+
+            string exportSource;
+
+            if (doc is PartDocument partDoc)
+            {
+                if (!(partDoc.ComponentDefinition is SheetMetalComponentDefinition smDef))
+                    throw new Exception("DXF desde piezas 3D requiere crear un plano (Drawing). Para chapa metálica, usa piezas con patrón plano.");
+
+                if (!smDef.HasFlatPattern)
+                    throw new Exception("La pieza de chapa metálica no tiene patrón plano. Activa el patrón plano antes de exportar.");
+
+                doc.SaveAs(savePath, true);
+                exportSource = "flat_pattern";
+            }
+            else if (doc is DrawingDocument)
+            {
+                doc.SaveAs(savePath, true);
+                exportSource = "drawing";
+            }
+            else
+            {
+                throw new Exception("DXF solo se exporta desde planos (.idw/.dwg) o piezas de chapa metálica (.ipt) con patrón plano.");
+            }
+
+            long fileSize = 0;
+            try { fileSize = new System.IO.FileInfo(savePath).Length; } catch { }
+
+            return new
+            {
+                Status        = "ok",
+                FilePath      = savePath,
+                ExportSource  = exportSource,
+                FileSizeBytes = fileSize,
+                DocumentName  = doc.DisplayName
+            };
+        }
+
+        private object CheckInterference(Dictionary<string, object> payload)
+        {
+            Document doc = _inventorApp.ActiveDocument;
+            if (!(doc is AssemblyDocument asmDoc))
+                throw new Exception("La comprobación de interferencias requiere un ensamble (.iam) activo.");
+
+            AssemblyComponentDefinition compDef = asmDoc.ComponentDefinition;
+
+            var allOccs = _inventorApp.TransientObjects.CreateObjectCollection();
+            for (int i = 1; i <= compDef.Occurrences.Count; i++)
+                allOccs.Add(compDef.Occurrences[i]);
+
+            if (allOccs.Count < 2)
+                throw new Exception("El ensamble necesita al menos 2 componentes para verificar interferencias.");
+
+            InterferenceResults results = compDef.AnalyzeInterference(allOccs, Type.Missing);
+
+            var pairs = new List<object>();
+            foreach (InterferenceResult r in results)
+            {
+                pairs.Add(new
+                {
+                    Component1 = r.OccurrenceOne.Name,
+                    Component2 = r.OccurrenceTwo.Name,
+                    Volume_cm3 = r.Volume,
+                    Centroid   = new { X = r.Centroid.X, Y = r.Centroid.Y, Z = r.Centroid.Z }
+                });
+            }
+
+            return new
+            {
+                Status            = "ok",
+                HasInterferences  = results.Count > 0,
+                InterferenceCount = results.Count,
+                Interferences     = pairs,
+                DocumentName      = asmDoc.DisplayName,
+                ComponentCount    = compDef.Occurrences.Count
+            };
+        }
+
+        private object GetMassProperties(Dictionary<string, object> payload)
+        {
+            Document doc = _inventorApp.ActiveDocument;
+            if (doc == null) throw new Exception("No hay documento activo");
+
+            MassProperties massProp;
+            string docType;
+
+            if (doc is PartDocument partDoc)
+            {
+                massProp = partDoc.ComponentDefinition.MassProperties;
+                docType  = "part";
+            }
+            else if (doc is AssemblyDocument asmDoc)
+            {
+                massProp = asmDoc.ComponentDefinition.MassProperties;
+                docType  = "assembly";
+            }
+            else
+            {
+                throw new Exception("Propiedades de masa disponibles solo para piezas (.ipt) y ensambles (.iam).");
+            }
+
+            Point com = massProp.CenterOfMass;
+
+            return new
+            {
+                Status          = "ok",
+                DocumentName    = doc.DisplayName,
+                DocumentType    = docType,
+                Mass_kg         = massProp.Mass,
+                Volume_cm3      = massProp.Volume,
+                SurfaceArea_cm2 = massProp.Area,
+                CenterOfMass    = new { X = com.X, Y = com.Y, Z = com.Z },
+                Units           = "mass:kg, volume:cm³, area:cm²"
+            };
         }
 
         // ── Grupo: Inicialización y gestión de entorno ────────────────────

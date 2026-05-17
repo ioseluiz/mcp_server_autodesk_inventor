@@ -2,6 +2,7 @@ import asyncio
 import uuid
 import os
 import json
+import base64
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Dict, Optional
@@ -263,13 +264,20 @@ async def update_parameter(name: str, value: str) -> str:
 
 
 @mcp.tool()
-async def export_to_step() -> str:
-    """Exporta el documento activo a un archivo STEP."""
+async def export_to_step(path: str = "") -> str:
+    """Exporta el documento activo a un archivo STEP para fabricación o interoperabilidad.
+
+    Args:
+        path: Ruta completa donde guardar el archivo .step (incluir extensión).
+              Si se omite, se guarda junto al documento activo con el mismo nombre.
+              Ejemplo: 'C:/Users/User/Documents/pieza.step'
+    """
     usuario = current_user_id.get(None)
     if not usuario:
         return "Error: sesión no autenticada."
     try:
-        data = await execute_in_inventor(usuario, "export_step", {}, timeout_seconds=60.0)
+        payload = {"path": path} if path else {}
+        data = await execute_in_inventor(usuario, "export_step", payload, timeout_seconds=60.0)
         return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
@@ -1000,6 +1008,112 @@ async def combine_bodies(
     try:
         payload = {"operation": operation, "base_body": base_body, "tool_bodies": tool_bodies}
         data = await execute_in_inventor(usuario, "combine_bodies", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+# ── Grupo: Diagnóstico, consulta y exportación ──────────────────────────
+
+@mcp.tool()
+async def render_screenshot(width: int = 1280, height: int = 720) -> str:
+    """Captura la vista actual de Inventor como imagen PNG codificada en base64.
+
+    Esencial para retroalimentación visual multimodal: el campo 'base64_data' contiene
+    la imagen PNG que puede ser interpretada por modelos con capacidad multimodal (Sonnet 4.6).
+
+    Args:
+        width:  Ancho de la imagen en píxeles (default 1280).
+        height: Alto de la imagen en píxeles (default 720).
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"width": width, "height": height}
+        data = await execute_in_inventor(usuario, "render_screenshot", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def export_to_stl(path: str = "") -> str:
+    """Exporta el modelo activo (pieza o ensamble) a un archivo STL para impresión 3D.
+
+    Args:
+        path: Ruta completa donde guardar el archivo .stl (incluir extensión).
+              Si se omite, se guarda junto al documento activo con el mismo nombre.
+              Ejemplo: 'C:/Users/User/Documents/pieza.stl'
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"path": path} if path else {}
+        data = await execute_in_inventor(usuario, "export_to_stl", payload, timeout_seconds=60.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def export_to_dxf(path: str = "") -> str:
+    """Exporta la cara de una chapa metálica desplegada o un dibujo (drawing) a DXF.
+
+    Útil para corte por láser o plasma. Para chapas metálicas exporta el flat pattern;
+    para documentos de dibujo (.idw) exporta la primera hoja como DXF.
+
+    Args:
+        path: Ruta completa donde guardar el archivo .dxf (incluir extensión).
+              Si se omite, se guarda junto al documento activo con el mismo nombre.
+              Ejemplo: 'C:/Users/User/Documents/chapa.dxf'
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"path": path} if path else {}
+        data = await execute_in_inventor(usuario, "export_to_dxf", payload, timeout_seconds=60.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def check_interference() -> str:
+    """Detecta colisiones geométricas entre componentes del ensamble activo.
+
+    Analiza todas las ocurrencias del ensamble en busca de interferencias.
+    Devuelve los pares de componentes en colisión, el volumen de interferencia
+    y el centroide de cada zona de colisión.
+
+    Requiere que el documento activo sea un ensamble (.iam) con al menos 2 componentes.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(usuario, "check_interference", {}, timeout_seconds=60.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def get_mass_properties() -> str:
+    """Calcula y devuelve las propiedades de masa del modelo activo.
+
+    Retorna: masa (kg), volumen (cm³), área de superficie (cm²) y
+    centro de gravedad (X, Y, Z) del primer cuerpo sólido o ensamble.
+
+    Compatible con documentos de pieza (.ipt) y ensamble (.iam).
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(usuario, "get_mass_properties", {}, timeout_seconds=30.0)
         return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
