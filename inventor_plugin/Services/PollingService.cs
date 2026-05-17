@@ -207,6 +207,18 @@ namespace InventorMCPBridge.Services
                     case "combine_bodies":
                         result = CombineBodies(task.Payload);
                         break;
+                    case "create_rectangular_pattern":
+                        result = CreateRectangularPattern(task.Payload);
+                        break;
+                    case "create_circular_pattern":
+                        result = CreateCircularPattern(task.Payload);
+                        break;
+                    case "mirror_feature":
+                        result = MirrorFeature(task.Payload);
+                        break;
+                    case "mirror_solid":
+                        result = MirrorSolid(task.Payload);
+                        break;
                     case "get_parameters":
                         result = GetParametersRich();
                         break;
@@ -1768,6 +1780,241 @@ namespace InventorMCPBridge.Services
                 EdgeCount   = edgeCount
             };
         }
+        // ── Grupo: Patrones y simetría ───────────────────────────────────────
+
+        private ObjectCollection CollectFeatures(PartComponentDefinition compDef, string featureNamesStr)
+        {
+            var coll = _inventorApp.TransientObjects.CreateObjectCollection();
+            int total = compDef.Features.Count;
+            if (total == 0) throw new Exception("La pieza no tiene operaciones.");
+
+            if (string.IsNullOrWhiteSpace(featureNamesStr))
+            {
+                // Default: last feature in the tree
+                int idx = 0;
+                foreach (PartFeature f in compDef.Features)
+                {
+                    idx++;
+                    if (idx == total) { coll.Add(f); break; }
+                }
+            }
+            else
+            {
+                foreach (string token in featureNamesStr.Split(','))
+                {
+                    string t = token.Trim();
+                    if (string.IsNullOrEmpty(t)) continue;
+
+                    PartFeature found = null;
+                    if (int.TryParse(t, out int targetIdx))
+                    {
+                        int i = 0;
+                        foreach (PartFeature f in compDef.Features)
+                        {
+                            i++;
+                            if (i == targetIdx) { found = f; break; }
+                        }
+                    }
+                    else
+                    {
+                        foreach (PartFeature f in compDef.Features)
+                        {
+                            if (string.Compare(f.Name, t, StringComparison.OrdinalIgnoreCase) == 0)
+                            { found = f; break; }
+                        }
+                    }
+
+                    if (found == null)
+                        throw new Exception($"Operación '{t}' no encontrada en el árbol de operaciones.");
+                    coll.Add(found);
+                }
+            }
+
+            if (coll.Count == 0)
+                throw new Exception("No se encontraron operaciones para procesar.");
+            return coll;
+        }
+
+        private WorkAxis AutoYAxis(PartComponentDefinition compDef, string xAxisName)
+        {
+            string u = xAxisName.ToUpper().Trim();
+            string autoName = (u == "Y") ? "X" : "Y";
+            return FindWorkAxisGeneral(compDef, autoName);
+        }
+
+        private object CreateRectangularPattern(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+            string units = payload != null && payload.ContainsKey("units") ? payload["units"].ToString() : "mm";
+
+            string featureNames = payload != null && payload.ContainsKey("feature_names")
+                ? payload["feature_names"].ToString() : "";
+            var features = CollectFeatures(compDef, featureNames);
+
+            string xAxisName = payload != null && payload.ContainsKey("x_axis")
+                ? payload["x_axis"].ToString() : "X";
+            int xCount = payload != null && payload.ContainsKey("x_count")
+                ? Convert.ToInt32(payload["x_count"]) : 2;
+            double xSpacing = payload != null && payload.ContainsKey("x_spacing")
+                ? Convert.ToDouble(payload["x_spacing"]) : 10.0;
+            int yCount = payload != null && payload.ContainsKey("y_count")
+                ? Convert.ToInt32(payload["y_count"]) : 1;
+            double ySpacing = payload != null && payload.ContainsKey("y_spacing")
+                ? Convert.ToDouble(payload["y_spacing"]) : 10.0;
+
+            string xSpacingExpr = xSpacing.ToString("F4") + " " + units;
+            string ySpacingExpr = ySpacing.ToString("F4") + " " + units;
+
+            WorkAxis xAxis = FindWorkAxisGeneral(compDef, xAxisName);
+            WorkAxis yAxis = payload != null && payload.ContainsKey("y_axis")
+                ? FindWorkAxisGeneral(compDef, payload["y_axis"].ToString())
+                : AutoYAxis(compDef, xAxisName);
+
+            var feature = compDef.Features.RectangularPatternFeatures.Add(
+                features,
+                xAxis, true,
+                xCount.ToString(), xSpacingExpr, PatternSpacingTypeEnum.kDefault, Type.Missing,
+                yAxis, true,
+                yCount.ToString(), ySpacingExpr, PatternSpacingTypeEnum.kDefault, Type.Missing,
+                PatternComputeTypeEnum.kIdenticalCompute,
+                PatternOrientationEnum.kIdentical);
+
+            int bodyCount = compDef.SurfaceBodies.Count;
+            int faceCount = bodyCount > 0 ? compDef.SurfaceBodies[1].Faces.Count : 0;
+            int edgeCount = bodyCount > 0 ? compDef.SurfaceBodies[1].Edges.Count : 0;
+
+            return new
+            {
+                Status         = "ok",
+                FeatureName    = feature.Name,
+                XAxis          = xAxisName,
+                XCount         = xCount,
+                XSpacing       = xSpacingExpr,
+                YAxis          = yAxis.Name,
+                YCount         = yCount,
+                YSpacing       = ySpacingExpr,
+                TotalInstances = xCount * yCount,
+                BodyCount      = bodyCount,
+                FaceCount      = faceCount,
+                EdgeCount      = edgeCount
+            };
+        }
+
+        private object CreateCircularPattern(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+
+            string featureNames = payload != null && payload.ContainsKey("feature_names")
+                ? payload["feature_names"].ToString() : "";
+            var features = CollectFeatures(compDef, featureNames);
+
+            string axisName = payload != null && payload.ContainsKey("axis")
+                ? payload["axis"].ToString() : "Z";
+            int count = payload != null && payload.ContainsKey("count")
+                ? Convert.ToInt32(payload["count"]) : 4;
+            double angle = payload != null && payload.ContainsKey("angle")
+                ? Convert.ToDouble(payload["angle"]) : 360.0;
+            // FitWithinAngle=true: 'angle' is total arc, instances equally spaced inside
+            // FitWithinAngle=false: 'angle' is spacing between consecutive instances
+            bool fitWithinAngle = payload == null || !payload.ContainsKey("fit_within_angle")
+                || Convert.ToBoolean(payload["fit_within_angle"]);
+
+            string angleExpr = angle.ToString("F4") + " deg";
+            WorkAxis axis = FindWorkAxisGeneral(compDef, axisName);
+
+            var feature = compDef.Features.CircularPatternFeatures.Add(
+                features, axis, true,
+                count.ToString(), angleExpr, fitWithinAngle,
+                PatternComputeTypeEnum.kIdenticalCompute);
+
+            int bodyCount = compDef.SurfaceBodies.Count;
+            int faceCount = bodyCount > 0 ? compDef.SurfaceBodies[1].Faces.Count : 0;
+            int edgeCount = bodyCount > 0 ? compDef.SurfaceBodies[1].Edges.Count : 0;
+
+            return new
+            {
+                Status         = "ok",
+                FeatureName    = feature.Name,
+                Axis           = axisName,
+                Count          = count,
+                TotalAngle     = angleExpr,
+                FitWithinAngle = fitWithinAngle,
+                BodyCount      = bodyCount,
+                FaceCount      = faceCount,
+                EdgeCount      = edgeCount
+            };
+        }
+
+        private object MirrorFeature(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+
+            string featureNames = payload != null && payload.ContainsKey("feature_names")
+                ? payload["feature_names"].ToString() : "";
+            var features = CollectFeatures(compDef, featureNames);
+
+            string planeName = payload != null && payload.ContainsKey("plane")
+                ? payload["plane"].ToString() : "XZ";
+            WorkPlane mirrorPlane = FindWorkPlaneGeneral(compDef, planeName);
+
+            var feature = compDef.Features.MirrorFeatures.Add(
+                features, mirrorPlane, false,
+                PatternComputeTypeEnum.kAdjustToModelCompute);
+
+            int bodyCount = compDef.SurfaceBodies.Count;
+            int faceCount = bodyCount > 0 ? compDef.SurfaceBodies[1].Faces.Count : 0;
+            int edgeCount = bodyCount > 0 ? compDef.SurfaceBodies[1].Edges.Count : 0;
+
+            return new
+            {
+                Status       = "ok",
+                FeatureName  = feature.Name,
+                Plane        = planeName,
+                FeaturesCount = features.Count,
+                BodyCount    = bodyCount,
+                FaceCount    = faceCount,
+                EdgeCount    = edgeCount
+            };
+        }
+
+        private object MirrorSolid(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+
+            string planeName = payload != null && payload.ContainsKey("plane")
+                ? payload["plane"].ToString() : "XZ";
+            WorkPlane mirrorPlane = FindWorkPlaneGeneral(compDef, planeName);
+
+            // Collect all solid features from the model tree
+            var features = _inventorApp.TransientObjects.CreateObjectCollection();
+            foreach (PartFeature f in compDef.Features)
+            {
+                try { features.Add(f); } catch { }
+            }
+
+            if (features.Count == 0)
+                throw new Exception("No se encontraron operaciones para espejar.");
+
+            var feature = compDef.Features.MirrorFeatures.Add(
+                features, mirrorPlane, false,
+                PatternComputeTypeEnum.kAdjustToModelCompute);
+
+            int bodyCount = compDef.SurfaceBodies.Count;
+            int faceCount = bodyCount > 0 ? compDef.SurfaceBodies[1].Faces.Count : 0;
+            int edgeCount = bodyCount > 0 ? compDef.SurfaceBodies[1].Edges.Count : 0;
+
+            return new
+            {
+                Status              = "ok",
+                FeatureName         = feature.Name,
+                Plane               = planeName,
+                MirroredFeatureCount = features.Count,
+                BodyCount           = bodyCount,
+                FaceCount           = faceCount,
+                EdgeCount           = edgeCount
+            };
+        }
+
         // ── Grupo: Parámetros e iProperties ─────────────────────────────────
 
         private string GetParamValueType(string units)

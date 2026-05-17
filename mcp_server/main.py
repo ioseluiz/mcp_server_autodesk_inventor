@@ -1431,6 +1431,169 @@ async def get_mass_properties() -> str:
         return f"Error: {str(e)}"
 
 
+# ── Grupo: Patrones y simetría ──────────────────────────────────────────
+
+@mcp.tool()
+async def create_rectangular_pattern(
+    feature_names: str = "",
+    x_axis: str = "X",
+    x_count: int = 2,
+    x_spacing: float = 10.0,
+    y_count: int = 1,
+    y_spacing: float = 10.0,
+    y_axis: str = "",
+    units: str = "mm",
+) -> str:
+    """Crea un patrón rectangular (arreglo de filas y columnas) de una o más operaciones.
+
+    Duplica la operación indicada en una cuadrícula rectangular definida por dos ejes de trabajo.
+
+    Args:
+        feature_names: Nombre(s) o índice(s) de las operaciones a repetir, separados por coma.
+                       Si se omite, toma la última operación del árbol del modelo.
+                       Ejemplo: 'Extrusion1' o '3,4' (índices 1-based).
+        x_axis:        Eje de trabajo para la dirección principal (X): 'X', 'Y', 'Z', nombre o índice.
+                       Por defecto 'X'.
+        x_count:       Número de instancias en la dirección X (incluyendo la original). Mínimo 2.
+        x_spacing:     Espaciado entre instancias en la dirección X.
+        y_count:       Número de instancias en la dirección Y. 1 = sin segunda dirección (default).
+        y_spacing:     Espaciado entre instancias en la dirección Y.
+        y_axis:        Eje de trabajo para la segunda dirección (Y). Si se omite, se elige
+                       automáticamente un eje perpendicular al x_axis.
+        units:         Unidad del espaciado: 'mm' (default), 'cm', 'm', 'in'.
+
+    Devuelve: FeatureName, XAxis, XCount, XSpacing, YAxis, YCount, YSpacing,
+              TotalInstances, BodyCount, FaceCount, EdgeCount.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {
+            "x_axis": x_axis,
+            "x_count": x_count,
+            "x_spacing": x_spacing,
+            "y_count": y_count,
+            "y_spacing": y_spacing,
+            "units": units,
+        }
+        if feature_names:
+            payload["feature_names"] = feature_names
+        if y_axis:
+            payload["y_axis"] = y_axis
+        data = await execute_in_inventor(usuario, "create_rectangular_pattern", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def create_circular_pattern(
+    feature_names: str = "",
+    axis: str = "Z",
+    count: int = 4,
+    angle: float = 360.0,
+    fit_within_angle: bool = True,
+) -> str:
+    """Crea un patrón circular de una operación alrededor de un eje de trabajo.
+
+    Útil para espaciar agujeros, pasadores o salientes de forma uniforme alrededor de un eje,
+    como los agujeros de perno en una brida.
+
+    Args:
+        feature_names:   Nombre(s) o índice(s) de la operación a repetir, separados por coma.
+                         Si se omite, toma la última operación del árbol del modelo.
+                         Ejemplo: 'Hole1' o '5'.
+        axis:            Eje de trabajo de revolución: 'X', 'Y', 'Z', nombre o índice del eje.
+                         Por defecto 'Z'.
+        count:           Número total de instancias en el patrón (incluyendo la original).
+        angle:           Ángulo total del patrón en grados (default 360 = círculo completo).
+        fit_within_angle: True (default): el ángulo es el ángulo total y las instancias se
+                          distribuyen dentro de él. False: el ángulo es el paso entre instancias.
+
+    Devuelve: FeatureName, Axis, Count, TotalAngle, FitWithinAngle, BodyCount, FaceCount, EdgeCount.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {
+            "axis": axis,
+            "count": count,
+            "angle": angle,
+            "fit_within_angle": fit_within_angle,
+        }
+        if feature_names:
+            payload["feature_names"] = feature_names
+        data = await execute_in_inventor(usuario, "create_circular_pattern", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def mirror_feature(
+    feature_names: str = "",
+    plane: str = "XZ",
+) -> str:
+    """Realiza la simetría (espejo) de una o más operaciones respecto a un plano de trabajo.
+
+    Crea copias simétricas de las operaciones seleccionadas al otro lado del plano indicado.
+    Las operaciones originales se conservan.
+
+    Args:
+        feature_names: Nombre(s) o índice(s) de la operación a espejar, separados por coma.
+                       Si se omite, toma la última operación del árbol del modelo.
+                       Ejemplo: 'Fillet1,Chamfer1' o '4'.
+        plane:         Plano de simetría: 'XY', 'XZ' o 'YZ' (planos de origen),
+                       o nombre/índice de cualquier plano de trabajo del documento.
+                       Por defecto 'XZ'.
+
+    Devuelve: FeatureName, Plane, FeaturesCount, BodyCount, FaceCount, EdgeCount.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {"plane": plane}
+        if feature_names:
+            payload["feature_names"] = feature_names
+        data = await execute_in_inventor(usuario, "mirror_feature", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def mirror_solid(
+    plane: str = "XZ",
+    keep_original: bool = True,
+) -> str:
+    """Realiza la simetría (espejo) de todo el cuerpo sólido respecto a un plano de trabajo.
+
+    Copia todo el sólido al otro lado del plano, lo que permite crear geometría simétrica
+    compleja a partir de media pieza modelada.
+
+    Args:
+        plane:         Plano de simetría: 'XY', 'XZ' o 'YZ' (planos de origen),
+                       o nombre/índice de cualquier plano de trabajo del documento.
+                       Por defecto 'XZ'.
+        keep_original: True (default) = mantiene el cuerpo original y añade el espejo.
+                       False = elimina el cuerpo original y solo deja el espejo.
+
+    Devuelve: FeatureName, Plane, MirroredFeatureCount, BodyCount, FaceCount, EdgeCount.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"plane": plane, "keep_original": keep_original}
+        data = await execute_in_inventor(usuario, "mirror_solid", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
 # =========================================================================
 # ENDPOINTS DE INFRAESTRUCTURA + SSE
 # All explicit routes must be registered BEFORE app.mount() calls so that
