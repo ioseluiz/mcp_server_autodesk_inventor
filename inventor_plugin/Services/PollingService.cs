@@ -207,6 +207,15 @@ namespace InventorMCPBridge.Services
                     case "combine_bodies":
                         result = CombineBodies(task.Payload);
                         break;
+                    case "create_work_plane":
+                        result = CreateWorkPlane(task.Payload);
+                        break;
+                    case "create_work_axis":
+                        result = CreateWorkAxis(task.Payload);
+                        break;
+                    case "create_work_point":
+                        result = CreateWorkPoint(task.Payload);
+                        break;
                     default:
                         error = $"Comando no reconocido: {task.Command}";
                         break;
@@ -788,7 +797,7 @@ namespace InventorMCPBridge.Services
                 ? payload["name"].ToString() : "";
 
             var compDef = partDoc.ComponentDefinition;
-            WorkPlane workPlane = FindOriginPlane(compDef, planeName);
+            WorkPlane workPlane = FindWorkPlaneGeneral(compDef, planeName);
 
             _activeSketch = compDef.Sketches.Add(workPlane);
             _sketchEntities.Clear();
@@ -1745,6 +1754,256 @@ namespace InventorMCPBridge.Services
                 BodyCount   = bodyCount,
                 FaceCount   = faceCount,
                 EdgeCount   = edgeCount
+            };
+        }
+        // ── Grupo: Geometría de trabajo ──────────────────────────────────────
+
+        private WorkPlane FindWorkPlaneGeneral(PartComponentDefinition compDef, string name)
+        {
+            string upper = name.ToUpper().Trim();
+            if (upper == "XY") return compDef.WorkPlanes[1];
+            if (upper == "XZ") return compDef.WorkPlanes[2];
+            if (upper == "YZ") return compDef.WorkPlanes[3];
+            foreach (WorkPlane wp in compDef.WorkPlanes)
+                if (string.Compare(wp.Name, name, StringComparison.OrdinalIgnoreCase) == 0)
+                    return wp;
+            if (int.TryParse(name, out int idx) && idx >= 1 && idx <= compDef.WorkPlanes.Count)
+                return compDef.WorkPlanes[idx];
+            throw new Exception($"Plano de trabajo '{name}' no encontrado. Usa: XY, XZ, YZ, nombre o índice.");
+        }
+
+        private WorkAxis FindWorkAxisGeneral(PartComponentDefinition compDef, string name)
+        {
+            string upper = name.ToUpper().Trim();
+            if (upper == "X") return compDef.WorkAxes[1];
+            if (upper == "Y") return compDef.WorkAxes[2];
+            if (upper == "Z") return compDef.WorkAxes[3];
+            foreach (WorkAxis wa in compDef.WorkAxes)
+                if (string.Compare(wa.Name, name, StringComparison.OrdinalIgnoreCase) == 0)
+                    return wa;
+            if (int.TryParse(name, out int idx) && idx >= 1 && idx <= compDef.WorkAxes.Count)
+                return compDef.WorkAxes[idx];
+            throw new Exception($"Eje de trabajo '{name}' no encontrado. Usa: X, Y, Z, nombre o índice.");
+        }
+
+        private double ToInventorCm(double value, string units)
+        {
+            switch (units.ToLower().Trim())
+            {
+                case "m":  return value * 100.0;
+                case "cm": return value;
+                case "in": return value * 2.54;
+                default:   return value * 0.1; // mm
+            }
+        }
+
+        private object CreateWorkPlane(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+            string mode = payload != null && payload.ContainsKey("mode")
+                ? payload["mode"].ToString().ToLower() : "offset";
+            string units = payload != null && payload.ContainsKey("units")
+                ? payload["units"].ToString() : "mm";
+
+            WorkPlane workPlane;
+            string description;
+
+            switch (mode)
+            {
+                case "offset":
+                {
+                    // AddByPlaneAndOffset(Object Plane, Object Offset [cm], Boolean Construction)
+                    string planeName = payload != null && payload.ContainsKey("plane")
+                        ? payload["plane"].ToString() : "XY";
+                    double offset = payload != null && payload.ContainsKey("offset")
+                        ? Convert.ToDouble(payload["offset"]) : 10.0;
+                    double offsetCm = ToInventorCm(offset, units);
+                    var refPlane = FindWorkPlaneGeneral(compDef, planeName);
+                    workPlane = compDef.WorkPlanes.AddByPlaneAndOffset(refPlane, offsetCm, false);
+                    description = $"Offset {offset} {units} from {planeName}";
+                    break;
+                }
+                case "angle":
+                {
+                    // AddByLinePlaneAndAngle(Object Line, Object Plane, Object Angle [rad], Boolean Construction)
+                    string planeName = payload != null && payload.ContainsKey("plane")
+                        ? payload["plane"].ToString() : "XY";
+                    string axisName = payload != null && payload.ContainsKey("axis")
+                        ? payload["axis"].ToString() : "X";
+                    double angleDeg = payload != null && payload.ContainsKey("angle")
+                        ? Convert.ToDouble(payload["angle"]) : 45.0;
+                    double angleRad = angleDeg * Math.PI / 180.0;
+                    var refPlane = FindWorkPlaneGeneral(compDef, planeName);
+                    var refAxis  = FindWorkAxisGeneral(compDef, axisName);
+                    workPlane = compDef.WorkPlanes.AddByLinePlaneAndAngle(refAxis, refPlane, angleRad, false);
+                    description = $"{angleDeg}° from {planeName} about axis {axisName}";
+                    break;
+                }
+                case "three_points":
+                {
+                    // AddByThreePoints(Object Point1, Object Point2, Object Point3, Boolean Construction)
+                    int p1Idx = payload != null && payload.ContainsKey("point1") ? Convert.ToInt32(payload["point1"]) : 1;
+                    int p2Idx = payload != null && payload.ContainsKey("point2") ? Convert.ToInt32(payload["point2"]) : 2;
+                    int p3Idx = payload != null && payload.ContainsKey("point3") ? Convert.ToInt32(payload["point3"]) : 3;
+                    int total = compDef.WorkPoints.Count;
+                    if (p1Idx < 1 || p1Idx > total) throw new Exception($"work_point {p1Idx} fuera de rango (1–{total}).");
+                    if (p2Idx < 1 || p2Idx > total) throw new Exception($"work_point {p2Idx} fuera de rango (1–{total}).");
+                    if (p3Idx < 1 || p3Idx > total) throw new Exception($"work_point {p3Idx} fuera de rango (1–{total}).");
+                    workPlane = compDef.WorkPlanes.AddByThreePoints(
+                        compDef.WorkPoints[p1Idx], compDef.WorkPoints[p2Idx], compDef.WorkPoints[p3Idx], false);
+                    description = $"Through work points {p1Idx}, {p2Idx}, {p3Idx}";
+                    break;
+                }
+                default:
+                    throw new Exception($"Modo '{mode}' no reconocido. Usa: offset, angle, three_points");
+            }
+
+            int totalPlanes = compDef.WorkPlanes.Count;
+            return new
+            {
+                Status          = "ok",
+                WorkPlaneName   = workPlane.Name,
+                WorkPlaneIndex  = totalPlanes,
+                WorkPlaneCount  = totalPlanes,
+                Mode            = mode,
+                Description     = description
+            };
+        }
+
+        private object CreateWorkAxis(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+            string mode = payload != null && payload.ContainsKey("mode")
+                ? payload["mode"].ToString().ToLower() : "cylinder";
+
+            WorkAxis workAxis;
+            string description;
+
+            switch (mode)
+            {
+                case "cylinder":
+                {
+                    // AddByRevolvedFace(Face Face, Boolean Construction)
+                    int faceIdx = payload != null && payload.ContainsKey("face_index")
+                        ? Convert.ToInt32(payload["face_index"]) : 1;
+                    var body = GetFirstBody(compDef);
+                    if (faceIdx < 1 || faceIdx > body.Faces.Count)
+                        throw new Exception($"Índice de cara {faceIdx} fuera de rango (1–{body.Faces.Count}).");
+                    Face face = body.Faces[faceIdx];
+                    if (face.SurfaceType != SurfaceTypeEnum.kCylinderSurface &&
+                        face.SurfaceType != SurfaceTypeEnum.kConeSurface)
+                        throw new Exception($"La cara {faceIdx} debe ser cilíndrica o cónica. Tipo actual: {face.SurfaceType}");
+                    workAxis = compDef.WorkAxes.AddByRevolvedFace(face, false);
+                    description = $"Axis of cylindrical face {faceIdx}";
+                    break;
+                }
+                case "two_planes":
+                {
+                    // AddByTwoPlanes(Object Plane1, Object Plane2, Boolean Construction)
+                    string plane1Name = payload != null && payload.ContainsKey("plane1")
+                        ? payload["plane1"].ToString() : "XY";
+                    string plane2Name = payload != null && payload.ContainsKey("plane2")
+                        ? payload["plane2"].ToString() : "YZ";
+                    var p1 = FindWorkPlaneGeneral(compDef, plane1Name);
+                    var p2 = FindWorkPlaneGeneral(compDef, plane2Name);
+                    workAxis = compDef.WorkAxes.AddByTwoPlanes(p1, p2, false);
+                    description = $"Intersection of {plane1Name} and {plane2Name}";
+                    break;
+                }
+                case "two_points":
+                {
+                    // AddByTwoPoints(Object Point1, Object Point2, Boolean Construction)
+                    int p1Idx = payload != null && payload.ContainsKey("point1")
+                        ? Convert.ToInt32(payload["point1"]) : 1;
+                    int p2Idx = payload != null && payload.ContainsKey("point2")
+                        ? Convert.ToInt32(payload["point2"]) : 2;
+                    int total = compDef.WorkPoints.Count;
+                    if (p1Idx < 1 || p1Idx > total) throw new Exception($"work_point {p1Idx} fuera de rango (1–{total}).");
+                    if (p2Idx < 1 || p2Idx > total) throw new Exception($"work_point {p2Idx} fuera de rango (1–{total}).");
+                    workAxis = compDef.WorkAxes.AddByTwoPoints(
+                        compDef.WorkPoints[p1Idx], compDef.WorkPoints[p2Idx], false);
+                    description = $"Through work points {p1Idx} and {p2Idx}";
+                    break;
+                }
+                default:
+                    throw new Exception($"Modo '{mode}' no reconocido. Usa: cylinder, two_planes, two_points");
+            }
+
+            int totalAxes = compDef.WorkAxes.Count;
+            return new
+            {
+                Status        = "ok",
+                WorkAxisName  = workAxis.Name,
+                WorkAxisIndex = totalAxes,
+                WorkAxisCount = totalAxes,
+                Mode          = mode,
+                Description   = description
+            };
+        }
+
+        private object CreateWorkPoint(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+            string mode = payload != null && payload.ContainsKey("mode")
+                ? payload["mode"].ToString().ToLower() : "fixed";
+            string units = payload != null && payload.ContainsKey("units")
+                ? payload["units"].ToString() : "mm";
+
+            WorkPoint workPoint;
+            string description;
+
+            switch (mode)
+            {
+                case "fixed":
+                {
+                    // AddFixed(Point Point, Boolean Construction)
+                    double x = payload != null && payload.ContainsKey("x") ? Convert.ToDouble(payload["x"]) : 0.0;
+                    double y = payload != null && payload.ContainsKey("y") ? Convert.ToDouble(payload["y"]) : 0.0;
+                    double z = payload != null && payload.ContainsKey("z") ? Convert.ToDouble(payload["z"]) : 0.0;
+                    Point pt = _inventorApp.TransientGeometry.CreatePoint(
+                        ToInventorCm(x, units), ToInventorCm(y, units), ToInventorCm(z, units));
+                    workPoint = compDef.WorkPoints.AddFixed(pt, false);
+                    description = $"Fixed at ({x}, {y}, {z}) {units}";
+                    break;
+                }
+                case "midpoint":
+                {
+                    // AddByMidPoint(Edge Edge, Boolean Construction)
+                    int edgeIdx = payload != null && payload.ContainsKey("edge_index")
+                        ? Convert.ToInt32(payload["edge_index"]) : 1;
+                    var body = GetFirstBody(compDef);
+                    if (edgeIdx < 1 || edgeIdx > body.Edges.Count)
+                        throw new Exception($"Índice de arista {edgeIdx} fuera de rango (1–{body.Edges.Count}).");
+                    workPoint = compDef.WorkPoints.AddByMidPoint(body.Edges[edgeIdx], false);
+                    description = $"Midpoint of edge {edgeIdx}";
+                    break;
+                }
+                case "three_planes":
+                {
+                    // AddByThreePlanes(Object Plane1, Object Plane2, Object Plane3, Boolean Construction)
+                    string plane1Name = payload != null && payload.ContainsKey("plane1") ? payload["plane1"].ToString() : "XY";
+                    string plane2Name = payload != null && payload.ContainsKey("plane2") ? payload["plane2"].ToString() : "XZ";
+                    string plane3Name = payload != null && payload.ContainsKey("plane3") ? payload["plane3"].ToString() : "YZ";
+                    var p1 = FindWorkPlaneGeneral(compDef, plane1Name);
+                    var p2 = FindWorkPlaneGeneral(compDef, plane2Name);
+                    var p3 = FindWorkPlaneGeneral(compDef, plane3Name);
+                    workPoint = compDef.WorkPoints.AddByThreePlanes(p1, p2, p3, false);
+                    description = $"Intersection of {plane1Name}, {plane2Name}, {plane3Name}";
+                    break;
+                }
+                default:
+                    throw new Exception($"Modo '{mode}' no reconocido. Usa: fixed, midpoint, three_planes");
+            }
+
+            int totalPoints = compDef.WorkPoints.Count;
+            return new
+            {
+                Status          = "ok",
+                WorkPointName   = workPoint.Name,
+                WorkPointIndex  = totalPoints,
+                WorkPointCount  = totalPoints,
+                Mode            = mode,
+                Description     = description
             };
         }
     }

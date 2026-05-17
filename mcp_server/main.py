@@ -439,7 +439,9 @@ async def create_sketch(plane: str = "XY", name: str = "") -> str:
     """Crea un nuevo boceto 2D en el plano de origen especificado.
 
     Args:
-        plane: Plano de origen donde crear el boceto: 'XY', 'XZ' o 'YZ'. Por defecto 'XY'.
+        plane: Plano donde crear el boceto: 'XY', 'XZ', 'YZ' (planos de origen),
+               o el nombre/índice de un plano de trabajo creado con create_work_plane.
+               Por defecto 'XY'.
         name:  Nombre opcional para el boceto. Si se omite, Inventor asigna uno automático.
     """
     usuario = current_user_id.get(None)
@@ -1008,6 +1010,170 @@ async def combine_bodies(
     try:
         payload = {"operation": operation, "base_body": base_body, "tool_bodies": tool_bodies}
         data = await execute_in_inventor(usuario, "combine_bodies", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+# ── Grupo: Geometría de trabajo ─────────────────────────────────────────
+
+@mcp.tool()
+async def create_work_plane(
+    mode: str = "offset",
+    plane: str = "XY",
+    offset: float = 10.0,
+    axis: str = "X",
+    angle: float = 45.0,
+    point1: int = 1,
+    point2: int = 2,
+    point3: int = 3,
+    units: str = "mm",
+) -> str:
+    """Crea un plano de trabajo paramétrico en la pieza activa.
+
+    Modos disponibles:
+      - 'offset' (default): paralelo a un plano de origen, desplazado una distancia.
+        Parámetros: plane ('XY'/'XZ'/'YZ' o nombre/índice), offset (distancia), units.
+      - 'angle': inclinado respecto a un plano, rotado sobre un eje de trabajo.
+        Parámetros: plane, axis ('X'/'Y'/'Z' o nombre/índice), angle (grados).
+      - 'three_points': pasa por tres puntos de trabajo existentes.
+        Parámetros: point1, point2, point3 (índices 1-based de WorkPoints).
+
+    El campo 'WorkPlaneName' del resultado puede pasarse como parámetro 'plane'
+    en create_sketch para crear bocetos sobre este plano de trabajo.
+
+    Args:
+        mode:   Tipo de construcción del plano: 'offset', 'angle' o 'three_points'.
+        plane:  Plano de referencia: 'XY', 'XZ', 'YZ', nombre del plano o índice.
+        offset: Distancia de desfase (solo modo 'offset').
+        axis:   Eje de rotación (solo modo 'angle'): 'X', 'Y', 'Z', nombre o índice.
+        angle:  Ángulo de inclinación en grados (solo modo 'angle').
+        point1: Índice del 1er punto de trabajo (solo modo 'three_points').
+        point2: Índice del 2do punto de trabajo (solo modo 'three_points').
+        point3: Índice del 3er punto de trabajo (solo modo 'three_points').
+        units:  Unidad del desfase: 'mm' (default), 'cm', 'm', 'in'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {"mode": mode, "units": units}
+        if mode == "offset":
+            payload["plane"] = plane
+            payload["offset"] = offset
+        elif mode == "angle":
+            payload["plane"] = plane
+            payload["axis"] = axis
+            payload["angle"] = angle
+        elif mode == "three_points":
+            payload["point1"] = point1
+            payload["point2"] = point2
+            payload["point3"] = point3
+        data = await execute_in_inventor(usuario, "create_work_plane", payload, timeout_seconds=20.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def create_work_axis(
+    mode: str = "cylinder",
+    face_index: int = 1,
+    plane1: str = "XY",
+    plane2: str = "YZ",
+    point1: int = 1,
+    point2: int = 2,
+) -> str:
+    """Crea un eje de trabajo paramétrico en la pieza activa.
+
+    Modos disponibles:
+      - 'cylinder' (default): extrae el eje central de una cara cilíndrica o cónica.
+        Parámetros: face_index (índice 1-based de la cara cilíndrica).
+      - 'two_planes': eje en la intersección de dos planos de trabajo.
+        Parámetros: plane1, plane2 ('XY'/'XZ'/'YZ', nombre o índice).
+      - 'two_points': eje que pasa por dos puntos de trabajo existentes.
+        Parámetros: point1, point2 (índices 1-based de WorkPoints).
+
+    El campo 'WorkAxisName' del resultado puede usarse como parámetro 'axis'
+    en create_work_plane (modo 'angle') para construir planos inclinados.
+
+    Args:
+        mode:       Tipo de construcción: 'cylinder', 'two_planes' o 'two_points'.
+        face_index: Índice de la cara cilíndrica/cónica (solo modo 'cylinder').
+        plane1:     Primer plano de referencia (solo modo 'two_planes').
+        plane2:     Segundo plano de referencia (solo modo 'two_planes').
+        point1:     Índice del 1er punto de trabajo (solo modo 'two_points').
+        point2:     Índice del 2do punto de trabajo (solo modo 'two_points').
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {"mode": mode}
+        if mode == "cylinder":
+            payload["face_index"] = face_index
+        elif mode == "two_planes":
+            payload["plane1"] = plane1
+            payload["plane2"] = plane2
+        elif mode == "two_points":
+            payload["point1"] = point1
+            payload["point2"] = point2
+        data = await execute_in_inventor(usuario, "create_work_axis", payload, timeout_seconds=20.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def create_work_point(
+    mode: str = "fixed",
+    x: float = 0.0,
+    y: float = 0.0,
+    z: float = 0.0,
+    edge_index: int = 1,
+    plane1: str = "XY",
+    plane2: str = "XZ",
+    plane3: str = "YZ",
+    units: str = "mm",
+) -> str:
+    """Crea un punto de trabajo paramétrico de referencia en la pieza activa.
+
+    Modos disponibles:
+      - 'fixed' (default): punto fijo en coordenadas 3D absolutas.
+        Parámetros: x, y, z (coordenadas), units.
+      - 'midpoint': punto en el punto medio de una arista del sólido.
+        Parámetros: edge_index (índice 1-based de la arista).
+      - 'three_planes': punto en la intersección de tres planos de trabajo.
+        Parámetros: plane1, plane2, plane3 ('XY'/'XZ'/'YZ', nombre o índice).
+
+    El campo 'WorkPointIndex' del resultado puede pasarse como 'point1/point2/point3'
+    en create_work_plane (modo 'three_points') o en create_work_axis (modo 'two_points').
+
+    Args:
+        mode:       Tipo de construcción: 'fixed', 'midpoint' o 'three_planes'.
+        x, y, z:   Coordenadas del punto fijo (solo modo 'fixed').
+        edge_index: Índice de la arista (solo modo 'midpoint').
+        plane1:     Primer plano (solo modo 'three_planes').
+        plane2:     Segundo plano (solo modo 'three_planes').
+        plane3:     Tercer plano (solo modo 'three_planes').
+        units:      Unidad de las coordenadas: 'mm' (default), 'cm', 'm', 'in'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {"mode": mode, "units": units}
+        if mode == "fixed":
+            payload["x"] = x
+            payload["y"] = y
+            payload["z"] = z
+        elif mode == "midpoint":
+            payload["edge_index"] = edge_index
+        elif mode == "three_planes":
+            payload["plane1"] = plane1
+            payload["plane2"] = plane2
+            payload["plane3"] = plane3
+        data = await execute_in_inventor(usuario, "create_work_point", payload, timeout_seconds=20.0)
         return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
