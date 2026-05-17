@@ -1015,6 +1015,152 @@ async def combine_bodies(
         return f"Error: {str(e)}"
 
 
+# ── Grupo: Parámetros e iProperties ─────────────────────────────────────
+
+@mcp.tool()
+async def get_parameters() -> str:
+    """Lista todos los parámetros del modelo activo, categorizados por tipo.
+
+    Devuelve tres grupos separados:
+      - ModelParameters: parámetros dimensionales creados por operaciones 3D (extrusión, etc.).
+      - UserParameters: parámetros creados por el usuario para controlar el diseño.
+      - ReferenceParameters: parámetros enlazados a otros documentos.
+
+    Para cada parámetro devuelve: Name, Value, Expression, Units, ValueType
+    (numeric / text / boolean) e InUse (solo parámetros de modelo).
+
+    Nota: la tool 'list_parameters' también lista parámetros pero con menos contexto.
+    Esta versión devuelve la estructura completa necesaria para razonamiento paramétrico.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(usuario, "get_parameters", {}, timeout_seconds=20.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def set_parameter_value(
+    name: str,
+    value: str = "",
+    units: str = "",
+    expression: str = "",
+    value_type: str = "numeric",
+) -> str:
+    """Cambia el valor de un parámetro existente y fuerza la actualización del modelo.
+
+    Puedes indicar el nuevo valor de dos formas:
+      1. 'expression': expresión completa tal como aparece en Inventor (ej: '25 mm', 'largo / 2').
+      2. 'value' + 'units': el agente construye la expresión automáticamente.
+
+    Para parámetros de texto usa value_type='text' y value='el texto'.
+    Para parámetros booleanos usa value_type='boolean' y value='true' o 'false'.
+
+    Args:
+        name:       Nombre exacto del parámetro (sensible a mayúsculas).
+        value:      Valor numérico o texto (usa junto a 'units' o 'value_type').
+        units:      Unidad del valor numérico: 'mm', 'cm', 'm', 'in', 'deg', etc.
+        expression: Expresión completa (tiene prioridad sobre value+units si se provee).
+        value_type: 'numeric' (default), 'text' o 'boolean'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {"name": name, "value_type": value_type}
+        if expression:
+            payload["expression"] = expression
+        elif value:
+            payload["value"] = value
+            if units:
+                payload["units"] = units
+        data = await execute_in_inventor(usuario, "set_parameter_value", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def add_custom_parameter(
+    name: str,
+    value_type: str = "numeric",
+    value: str = "0",
+    units: str = "mm",
+) -> str:
+    """Crea un nuevo parámetro de usuario (UserParameter) en el documento activo.
+
+    Los parámetros de usuario permiten definir variables de diseño globales que
+    otras dimensiones y operaciones pueden referenciar por nombre.
+
+    Args:
+        name:       Nombre único del parámetro (sin espacios, sin caracteres especiales).
+        value_type: Tipo del parámetro:
+                    - 'numeric' (default): valor numérico con unidades.
+                    - 'text': cadena de texto.
+                    - 'boolean': valor lógico (True/False).
+        value:      Valor inicial del parámetro:
+                    - numeric: número (ej. '25', '3.14').
+                    - text: cadena (ej. 'Acero inoxidable').
+                    - boolean: 'true' o 'false'.
+        units:      Unidades para parámetros numéricos: 'mm' (default), 'cm', 'm', 'in', 'deg'.
+                    Ignorado para tipos text y boolean.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"name": name, "value_type": value_type, "value": value, "units": units}
+        data = await execute_in_inventor(usuario, "add_custom_parameter", payload, timeout_seconds=20.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def update_iproperties(
+    title: str = "",
+    author: str = "",
+    part_number: str = "",
+    description: str = "",
+    subject: str = "",
+    keywords: str = "",
+) -> str:
+    """Modifica los metadatos (iProperties) del documento activo en Inventor.
+
+    Solo actualiza los campos que se proporcionen (los campos vacíos se ignoran).
+
+    Campos disponibles:
+      - title:       Título del documento (iProperty 'Title').
+      - author:      Autor o diseñador (iProperty 'Author').
+      - part_number: Código de inventario o número de pieza (iProperty 'Part Number').
+      - description: Descripción técnica de la pieza (iProperty 'Description').
+      - subject:     Asunto o categoría del documento (iProperty 'Subject').
+      - keywords:    Palabras clave separadas por comas (iProperty 'Keywords').
+
+    Devuelve la lista de campos actualizados correctamente y los errores si los hay.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {}
+        if title:       payload["title"]       = title
+        if author:      payload["author"]       = author
+        if part_number: payload["part_number"]  = part_number
+        if description: payload["description"]  = description
+        if subject:     payload["subject"]      = subject
+        if keywords:    payload["keywords"]     = keywords
+        if not payload:
+            return json.dumps({"Status": "error", "Error": "No se proporcionó ningún campo para actualizar."})
+        data = await execute_in_inventor(usuario, "update_iproperties", payload, timeout_seconds=20.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
 # ── Grupo: Geometría de trabajo ─────────────────────────────────────────
 
 @mcp.tool()

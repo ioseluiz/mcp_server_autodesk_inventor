@@ -207,6 +207,18 @@ namespace InventorMCPBridge.Services
                     case "combine_bodies":
                         result = CombineBodies(task.Payload);
                         break;
+                    case "get_parameters":
+                        result = GetParametersRich();
+                        break;
+                    case "set_parameter_value":
+                        result = SetParameterValue(task.Payload);
+                        break;
+                    case "add_custom_parameter":
+                        result = AddCustomParameter(task.Payload);
+                        break;
+                    case "update_iproperties":
+                        result = UpdateIProperties(task.Payload);
+                        break;
                     case "create_work_plane":
                         result = CreateWorkPlane(task.Payload);
                         break;
@@ -1756,6 +1768,266 @@ namespace InventorMCPBridge.Services
                 EdgeCount   = edgeCount
             };
         }
+        // ── Grupo: Parámetros e iProperties ─────────────────────────────────
+
+        private string GetParamValueType(string units)
+        {
+            if (string.IsNullOrEmpty(units)) return "numeric";
+            switch (units.Trim().ToLower())
+            {
+                case "text":    return "text";
+                case "boolean": return "boolean";
+                default:        return "numeric";
+            }
+        }
+
+        private PropertySets GetDocPropertySets()
+        {
+            var doc = _inventorApp.ActiveDocument;
+            if (doc is PartDocument pd)     return pd.PropertySets;
+            if (doc is AssemblyDocument ad) return ad.PropertySets;
+            if (doc is DrawingDocument dd)  return dd.PropertySets;
+            throw new Exception("El tipo de documento no soporta iProperties.");
+        }
+
+        private void SetIPropertySafe(PropertySet ps, string propName, string value,
+            List<string> updated, List<string> errors)
+        {
+            if (ps == null) { errors.Add($"PropertySet no encontrado para '{propName}'"); return; }
+            try   { ps[propName].Value = value; updated.Add(propName); }
+            catch (Exception ex) { errors.Add($"{propName}: {ex.Message}"); }
+        }
+
+        private object GetParametersRich()
+        {
+            var doc = _inventorApp.ActiveDocument;
+            if (doc == null) return new { Status = "error", Error = "No hay documento activo" };
+
+            Inventor.Parameters docParams = null;
+            if (doc is PartDocument partDoc)         docParams = partDoc.ComponentDefinition.Parameters;
+            else if (doc is AssemblyDocument asmDoc) docParams = asmDoc.ComponentDefinition.Parameters;
+            if (docParams == null)
+                return new { Status = "error", Error = "El documento no soporta parámetros." };
+
+            var modelList = new List<object>();
+            var userList  = new List<object>();
+            var refList   = new List<object>();
+
+            foreach (ModelParameter p in docParams.ModelParameters)
+            {
+                string u = p.get_Units();
+                modelList.Add(new { Name = p.Name, Value = p.Value, Expression = p.Expression,
+                    Units = u, InUse = p.InUse, ValueType = GetParamValueType(u) });
+            }
+            foreach (UserParameter p in docParams.UserParameters)
+            {
+                string u = p.get_Units();
+                userList.Add(new { Name = p.Name, Value = p.Value, Expression = p.Expression,
+                    Units = u, ValueType = GetParamValueType(u) });
+            }
+            foreach (Inventor.Parameter p in docParams.ReferenceParameters)
+            {
+                string u = p.get_Units();
+                refList.Add(new { Name = p.Name, Value = p.Value, Expression = p.Expression,
+                    Units = u, ValueType = GetParamValueType(u) });
+            }
+
+            return new
+            {
+                Status                  = "ok",
+                DocumentName            = doc.DisplayName,
+                TotalCount              = modelList.Count + userList.Count + refList.Count,
+                ModelParameterCount     = modelList.Count,
+                UserParameterCount      = userList.Count,
+                ReferenceParameterCount = refList.Count,
+                ModelParameters         = modelList,
+                UserParameters          = userList,
+                ReferenceParameters     = refList
+            };
+        }
+
+        private object SetParameterValue(Dictionary<string, object> payload)
+        {
+            if (payload == null || !payload.ContainsKey("name"))
+                throw new Exception("Falta el parámetro 'name'.");
+
+            string name = payload["name"].ToString();
+
+            // Build expression from 'expression' or 'value' + optional 'units'
+            string newExpr;
+            if (payload.ContainsKey("expression") && !string.IsNullOrWhiteSpace(payload["expression"]?.ToString()))
+            {
+                newExpr = payload["expression"].ToString();
+            }
+            else if (payload.ContainsKey("value"))
+            {
+                string raw       = payload["value"].ToString();
+                string valueType = payload.ContainsKey("value_type") ? payload["value_type"].ToString().ToLower() : "numeric";
+                if (valueType == "text")
+                    newExpr = "\"" + raw.Replace("\"", "\\\"") + "\"";
+                else if (valueType == "boolean")
+                    newExpr = (raw.ToLower() == "true" || raw == "1") ? "True" : "False";
+                else // numeric
+                {
+                    string u = payload.ContainsKey("units") ? payload["units"].ToString() : "";
+                    newExpr = string.IsNullOrEmpty(u) ? raw : raw + " " + u;
+                }
+            }
+            else
+            {
+                throw new Exception("Falta 'expression' o 'value'.");
+            }
+
+            var doc = _inventorApp.ActiveDocument;
+            Inventor.Parameters docParams = null;
+            if (doc is PartDocument partDoc)         docParams = partDoc.ComponentDefinition.Parameters;
+            else if (doc is AssemblyDocument asmDoc) docParams = asmDoc.ComponentDefinition.Parameters;
+            if (docParams == null) throw new Exception("El documento no soporta parámetros.");
+
+            Inventor.Parameter found = null;
+            string paramTypeName = "";
+            foreach (ModelParameter p in docParams.ModelParameters)
+                if (p.Name == name) { found = (Inventor.Parameter)(object)p; paramTypeName = "Model"; break; }
+            if (found == null)
+                foreach (UserParameter p in docParams.UserParameters)
+                    if (p.Name == name) { found = (Inventor.Parameter)(object)p; paramTypeName = "User"; break; }
+            if (found == null)
+                foreach (Inventor.Parameter p in docParams.ReferenceParameters)
+                    if (p.Name == name) { found = p; paramTypeName = "Reference"; break; }
+
+            if (found == null)
+                throw new Exception($"Parámetro '{name}' no encontrado en el documento.");
+
+            string oldExpr  = found.Expression;
+            object oldValue = found.Value;
+            string units    = found.get_Units();
+
+            found.Expression = newExpr;
+            doc.Update();
+
+            return new
+            {
+                Status        = "ok",
+                Name          = name,
+                ParameterType = paramTypeName,
+                OldExpression = oldExpr,
+                NewExpression = found.Expression,
+                OldValue      = oldValue,
+                NewValue      = found.Value,
+                Units         = units,
+                DocumentName  = doc.DisplayName
+            };
+        }
+
+        private object AddCustomParameter(Dictionary<string, object> payload)
+        {
+            if (payload == null || !payload.ContainsKey("name"))
+                throw new Exception("Falta el parámetro 'name'.");
+
+            string name      = payload["name"].ToString();
+            string valueType = payload.ContainsKey("value_type") ? payload["value_type"].ToString().ToLower() : "numeric";
+
+            var doc = _inventorApp.ActiveDocument;
+            Inventor.Parameters docParams = null;
+            if (doc is PartDocument partDoc)         docParams = partDoc.ComponentDefinition.Parameters;
+            else if (doc is AssemblyDocument asmDoc) docParams = asmDoc.ComponentDefinition.Parameters;
+            if (docParams == null) throw new Exception("El documento no soporta parámetros.");
+
+            UserParameter newParam;
+            string expression, units;
+
+            switch (valueType)
+            {
+                case "text":
+                {
+                    string val = payload.ContainsKey("value") ? payload["value"].ToString() : "";
+                    expression = "\"" + val.Replace("\"", "\\\"") + "\"";
+                    units      = "Text";
+                    newParam   = docParams.UserParameters.AddByExpression(name, expression, UnitsTypeEnum.kTextUnits);
+                    break;
+                }
+                case "boolean":
+                {
+                    bool boolVal = payload.ContainsKey("value") &&
+                        (payload["value"].ToString().ToLower() == "true" || payload["value"].ToString() == "1");
+                    expression = boolVal ? "True" : "False";
+                    units      = "Boolean";
+                    newParam   = docParams.UserParameters.AddByExpression(name, expression, UnitsTypeEnum.kBooleanUnits);
+                    break;
+                }
+                default: // numeric
+                {
+                    units      = payload.ContainsKey("units") ? payload["units"].ToString() : "mm";
+                    string val = payload.ContainsKey("value") ? payload["value"].ToString() : "0";
+                    expression = val + " " + units;
+                    newParam   = docParams.UserParameters.AddByExpression(name, expression, units);
+                    break;
+                }
+            }
+
+            return new
+            {
+                Status       = "ok",
+                Name         = newParam.Name,
+                Value        = newParam.Value,
+                Expression   = newParam.Expression,
+                Units        = newParam.get_Units(),
+                ValueType    = valueType,
+                DocumentName = doc.DisplayName
+            };
+        }
+
+        private object UpdateIProperties(Dictionary<string, object> payload)
+        {
+            if (payload == null || payload.Count == 0)
+                throw new Exception("No se proporcionaron campos para actualizar.");
+
+            var doc = _inventorApp.ActiveDocument;
+            if (doc == null) throw new Exception("No hay documento activo.");
+
+            PropertySets allPS    = GetDocPropertySets();
+            PropertySet summaryPS  = null; // Title, Author, Subject, Keywords, Comments
+            PropertySet trackingPS = null; // Description, Part Number, Revision Number…
+
+            foreach (PropertySet ps in allPS)
+            {
+                string dn = ps.DisplayName ?? "";
+                if (dn.IndexOf("Summary", StringComparison.OrdinalIgnoreCase) >= 0)
+                    summaryPS = ps;
+                else if (dn.IndexOf("Design Tracking", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         dn.IndexOf("Tracking", StringComparison.OrdinalIgnoreCase) >= 0)
+                    trackingPS = ps;
+            }
+
+            var updated = new List<string>();
+            var errors  = new List<string>();
+
+            if (payload.ContainsKey("title") && payload["title"] != null)
+                SetIPropertySafe(summaryPS, "Title", payload["title"].ToString(), updated, errors);
+            if (payload.ContainsKey("author") && payload["author"] != null)
+                SetIPropertySafe(summaryPS, "Author", payload["author"].ToString(), updated, errors);
+            if (payload.ContainsKey("subject") && payload["subject"] != null)
+                SetIPropertySafe(summaryPS, "Subject", payload["subject"].ToString(), updated, errors);
+            if (payload.ContainsKey("keywords") && payload["keywords"] != null)
+                SetIPropertySafe(summaryPS, "Keywords", payload["keywords"].ToString(), updated, errors);
+            if (payload.ContainsKey("description") && payload["description"] != null)
+                SetIPropertySafe(trackingPS, "Description", payload["description"].ToString(), updated, errors);
+            if (payload.ContainsKey("part_number") && payload["part_number"] != null)
+                SetIPropertySafe(trackingPS, "Part Number", payload["part_number"].ToString(), updated, errors);
+
+            if (errors.Count == 0 && updated.Count == 0)
+                throw new Exception("Ningún campo fue actualizado. Revisa los nombres de los campos.");
+
+            return new
+            {
+                Status        = errors.Count == 0 ? "ok" : "partial",
+                UpdatedFields = updated,
+                Errors        = errors,
+                DocumentName  = doc.DisplayName,
+                FullFileName  = doc.FullFileName
+            };
+        }
+
         // ── Grupo: Geometría de trabajo ──────────────────────────────────────
 
         private WorkPlane FindWorkPlaneGeneral(PartComponentDefinition compDef, string name)
