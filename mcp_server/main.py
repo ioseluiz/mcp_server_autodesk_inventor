@@ -653,6 +653,172 @@ async def close_sketch() -> str:
         return f"Error: {str(e)}"
 
 
+# ── Grupo: Sólidos base ──────────────────────────────────────────────────
+
+@mcp.tool()
+async def extrude_profile(
+    distance: float,
+    operation: str = "join",
+    direction: str = "positive",
+    units: str = "mm",
+) -> str:
+    """Extruye el perfil cerrado del boceto activo para crear o modificar un sólido.
+
+    Args:
+        distance:  Distancia de extrusión en las unidades indicadas.
+        operation: 'join' (unión, default), 'cut' (corte) o 'intersect' (intersección).
+        direction: 'positive' (default), 'negative' o 'symmetric'.
+        units:     Unidad de la distancia: 'mm' (default), 'cm', 'm', 'in'.
+
+    Nota: debe haber un boceto activo con un perfil cerrado (usa create_sketch + draw_*).
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"distance": distance, "operation": operation,
+                   "direction": direction, "units": units}
+        data = await execute_in_inventor(usuario, "extrude_profile", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def revolve_profile(
+    axis: str = "X",
+    angle: float = 360.0,
+    operation: str = "join",
+    direction: str = "positive",
+) -> str:
+    """Crea un sólido de revolución girando el perfil del boceto activo alrededor de un eje.
+
+    Args:
+        axis:      Eje de revolución: 'X', 'Y' o 'Z' (ejes de origen del documento).
+        angle:     Ángulo de revolución en grados (360 = revolución completa, default).
+        operation: 'join' (default), 'cut' o 'intersect'.
+        direction: 'positive' (default) o 'negative' (para ángulos parciales).
+
+    Nota: el perfil del boceto activo debe estar a un lado del eje seleccionado.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"axis": axis, "angle": angle, "operation": operation, "direction": direction}
+        data = await execute_in_inventor(usuario, "revolve_profile", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def sweep_profile(
+    path_sketch: str,
+    operation: str = "join",
+) -> str:
+    """Crea un sólido de barrido moviendo el perfil del boceto activo a lo largo de una trayectoria.
+
+    Args:
+        path_sketch: Nombre del boceto que contiene la trayectoria (debe ser un boceto
+                     diferente al del perfil, con una curva abierta o cerrada continua).
+        operation:   'join' (default), 'cut' o 'intersect'.
+
+    Flujo típico:
+      1. create_sketch('XY') + draw línea/arco → boceto de trayectoria.
+      2. close_sketch().
+      3. create_sketch('YZ') + draw_rectangle o círculo → perfil.
+      4. sweep_profile(path_sketch='nombre del boceto de trayectoria').
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"path_sketch": path_sketch, "operation": operation}
+        data = await execute_in_inventor(usuario, "sweep_profile", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def loft_profiles(
+    sketches: str,
+    operation: str = "join",
+) -> str:
+    """Crea un sólido de transición (loft) entre dos o más perfiles en bocetos distintos.
+
+    Args:
+        sketches:  Nombres de los bocetos separados por coma, en orden de transición.
+                   Ejemplo: 'Sketch1,Sketch2,Sketch3'. Mínimo 2 bocetos.
+        operation: 'join' (default), 'cut' o 'intersect'.
+
+    Flujo típico:
+      1. create_sketch('XY', name='Perfil1') + draw forma + close_sketch.
+      2. create_sketch('XZ', name='Perfil2') + draw forma + close_sketch.
+         (cada boceto debe estar en un plano diferente para que el loft tenga profundidad).
+      3. loft_profiles(sketches='Perfil1,Perfil2').
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"sketches": sketches, "operation": operation}
+        data = await execute_in_inventor(usuario, "loft_profiles", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def create_hole(
+    diameter: float,
+    depth: float = 0,
+    through: bool = False,
+    hole_type: str = "drilled",
+    cbore_diameter: float = 0,
+    cbore_depth: float = 0,
+    csink_diameter: float = 0,
+    csink_angle: float = 90,
+    units: str = "mm",
+) -> str:
+    """Coloca agujeros en el sólido usando las posiciones del boceto activo.
+
+    El boceto activo debe contener círculos (sus centros serán los centros de los agujeros)
+    o puntos de boceto. El boceto debe estar sobre una cara plana del sólido.
+
+    Args:
+        diameter:      Diámetro del agujero.
+        depth:         Profundidad del agujero (ignorado si through=True).
+        through:       True = agujero pasante, False = profundidad fija.
+        hole_type:     'drilled' (simple, default), 'cbore' (avellanado plano),
+                       'csink' (avellanado cónico).
+        cbore_diameter: Diámetro del avellanado plano (solo para hole_type='cbore').
+        cbore_depth:    Profundidad del avellanado plano.
+        csink_diameter: Diámetro del avellanado cónico (solo para hole_type='csink').
+        csink_angle:    Ángulo del cono del avellanado cónico en grados (default 90°).
+        units:          Unidad de medida: 'mm' (default), 'cm', 'in'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {"diameter": diameter, "through": through,
+                         "hole_type": hole_type, "units": units}
+        if not through and depth > 0:
+            payload["depth"] = depth
+        if hole_type == "cbore" and cbore_diameter > 0:
+            payload["cbore_diameter"] = cbore_diameter
+            payload["cbore_depth"] = cbore_depth
+        if hole_type == "csink" and csink_diameter > 0:
+            payload["csink_diameter"] = csink_diameter
+            payload["csink_angle"] = csink_angle
+        data = await execute_in_inventor(usuario, "create_hole", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
 # =========================================================================
 # ENDPOINTS DE INFRAESTRUCTURA + SSE
 # All explicit routes must be registered BEFORE app.mount() calls so that

@@ -159,6 +159,21 @@ namespace InventorMCPBridge.Services
                     case "close_sketch":
                         result = CloseSketch(task.Payload);
                         break;
+                    case "extrude_profile":
+                        result = ExtrudeProfile(task.Payload);
+                        break;
+                    case "revolve_profile":
+                        result = RevolveProfile(task.Payload);
+                        break;
+                    case "sweep_profile":
+                        result = SweepProfile(task.Payload);
+                        break;
+                    case "loft_profiles":
+                        result = LoftProfiles(task.Payload);
+                        break;
+                    case "create_hole":
+                        result = CreateHole(task.Payload);
+                        break;
                     default:
                         error = $"Comando no reconocido: {task.Command}";
                         break;
@@ -784,6 +799,253 @@ namespace InventorMCPBridge.Services
             _sketchEntities.Clear();
 
             return $"Boceto '{name}' cerrado y listo para operaciones 3D.";
+        }
+
+        // ── Grupo: Sólidos base (extrusión / revolución / barrido / loft / agujero) ─
+
+        private PartComponentDefinition GetPartCompDef()
+        {
+            var doc = _inventorApp.ActiveDocument;
+            if (!(doc is PartDocument partDoc))
+                throw new Exception("El documento activo debe ser una pieza (.ipt)");
+            return partDoc.ComponentDefinition;
+        }
+
+        private PartFeatureOperationEnum ParseOperation(Dictionary<string, object> payload)
+        {
+            string op = payload != null && payload.ContainsKey("operation")
+                ? payload["operation"].ToString().ToLower() : "join";
+            switch (op)
+            {
+                case "cut":       return PartFeatureOperationEnum.kCutOperation;
+                case "intersect": return PartFeatureOperationEnum.kIntersectOperation;
+                default:          return PartFeatureOperationEnum.kJoinOperation;
+            }
+        }
+
+        private string BuildExpr(Dictionary<string, object> payload, string key, string defaultVal, string defaultUnit = "mm")
+        {
+            if (payload == null || !payload.ContainsKey(key)) return defaultVal;
+            string unit = payload.ContainsKey("units") ? payload["units"].ToString() : defaultUnit;
+            return payload[key].ToString() + " " + unit;
+        }
+
+        private object ExtrudeProfile(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+            var sketch  = GetActiveSketch();
+
+            Profile profile = sketch.Profiles._AddForSolid();
+
+            string distExpr = BuildExpr(payload, "distance", "10 mm");
+            var operation   = ParseOperation(payload);
+
+            string dirStr = payload != null && payload.ContainsKey("direction")
+                ? payload["direction"].ToString().ToLower() : "positive";
+            var direction = dirStr == "negative"  ? PartFeatureExtentDirectionEnum.kNegativeExtentDirection
+                : dirStr == "symmetric"           ? PartFeatureExtentDirectionEnum.kSymmetricExtentDirection
+                : PartFeatureExtentDirectionEnum.kPositiveExtentDirection;
+
+            var feature = compDef.Features.ExtrudeFeatures.AddByDistanceExtent(
+                profile, distExpr, direction, operation, 0);
+
+            return new { FeatureName = feature.Name, Distance = distExpr, Operation = dirStr };
+        }
+
+        private object RevolveProfile(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+            var sketch  = GetActiveSketch();
+
+            Profile profile = sketch.Profiles._AddForSolid();
+            var operation   = ParseOperation(payload);
+
+            string axisName = payload != null && payload.ContainsKey("axis")
+                ? payload["axis"].ToString().ToUpper() : "X";
+            object axis;
+            switch (axisName)
+            {
+                case "X": axis = compDef.WorkAxes[1]; break;
+                case "Y": axis = compDef.WorkAxes[2]; break;
+                case "Z": axis = compDef.WorkAxes[3]; break;
+                default:  throw new Exception($"Eje '{axisName}' no reconocido. Usa: X, Y, Z");
+            }
+
+            double angleDeg = payload != null && payload.ContainsKey("angle")
+                ? Convert.ToDouble(payload["angle"]) : 360.0;
+            bool full = Math.Abs(angleDeg - 360.0) < 0.001;
+
+            RevolveFeature feature;
+            if (full)
+            {
+                feature = compDef.Features.RevolveFeatures.AddFull(profile, axis, operation);
+            }
+            else
+            {
+                string angleExpr = angleDeg.ToString("F4") + " deg";
+                string dirStr = payload != null && payload.ContainsKey("direction")
+                    ? payload["direction"].ToString().ToLower() : "positive";
+                var dir = dirStr == "negative"
+                    ? PartFeatureExtentDirectionEnum.kNegativeExtentDirection
+                    : PartFeatureExtentDirectionEnum.kPositiveExtentDirection;
+                feature = compDef.Features.RevolveFeatures.AddByAngle(
+                    profile, axis, angleExpr, dir, operation);
+            }
+
+            return new { FeatureName = feature.Name, Angle = angleDeg, Axis = axisName };
+        }
+
+        private object SweepProfile(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+            var sketch  = GetActiveSketch();
+
+            Profile profile = sketch.Profiles._AddForSolid();
+            var operation   = ParseOperation(payload);
+
+            // Find path sketch by name (different from the active/profile sketch)
+            string pathSketchName = payload != null && payload.ContainsKey("path_sketch")
+                ? payload["path_sketch"].ToString() : "";
+            PlanarSketch pathSketch = null;
+
+            foreach (PlanarSketch s in compDef.Sketches)
+            {
+                if (!string.IsNullOrEmpty(pathSketchName))
+                {
+                    if (s.Name == pathSketchName) { pathSketch = s; break; }
+                }
+                else if (s != _activeSketch)
+                {
+                    pathSketch = s; // use last non-active sketch as fallback
+                }
+            }
+
+            if (pathSketch == null)
+                throw new Exception(
+                    "No se encontró boceto de trayectoria. Indica 'path_sketch' con el nombre del boceto.");
+
+            // Collect non-reference entities from the path sketch
+            var pathEntities = _inventorApp.TransientObjects.CreateObjectCollection();
+            foreach (SketchEntity entity in pathSketch.SketchEntities)
+            {
+                if (!entity.Reference) pathEntities.Add(entity);
+            }
+
+            if (pathEntities.Count == 0)
+                throw new Exception($"El boceto de trayectoria '{pathSketch.Name}' no contiene entidades válidas.");
+
+            var sweepFeatures = compDef.Features.SweepFeatures;
+            Path sweepPath = sweepFeatures.CreatePath(pathEntities);
+
+            var feature = sweepFeatures.AddUsingPath(
+                profile, sweepPath, operation,
+                SweepProfileOrientationEnum.kNormalToPath, 0);
+
+            return new { FeatureName = feature.Name, PathSketch = pathSketch.Name };
+        }
+
+        private object LoftProfiles(Dictionary<string, object> payload)
+        {
+            var compDef = GetPartCompDef();
+
+            // Parse sketch names (accepts JArray or comma-separated string)
+            var sketchNames = new List<string>();
+            if (payload != null && payload.ContainsKey("sketches"))
+            {
+                var val = payload["sketches"];
+                if (val is Newtonsoft.Json.Linq.JArray arr)
+                {
+                    foreach (var item in arr) sketchNames.Add(item.ToString());
+                }
+                else
+                {
+                    foreach (var part in val.ToString().Split(','))
+                        sketchNames.Add(part.Trim());
+                }
+            }
+
+            if (sketchNames.Count < 2)
+                throw new Exception(
+                    "Se necesitan al menos 2 bocetos. Usa 'sketches': [\"boceto1\", \"boceto2\"]");
+
+            var sections = _inventorApp.TransientObjects.CreateObjectCollection();
+            foreach (string name in sketchNames)
+            {
+                PlanarSketch found = null;
+                foreach (PlanarSketch s in compDef.Sketches)
+                    if (s.Name == name) { found = s; break; }
+
+                if (found == null)
+                    throw new Exception($"Boceto '{name}' no encontrado en el documento.");
+
+                sections.Add(found.Profiles._AddForSolid());
+            }
+
+            var operation   = ParseOperation(payload);
+            var loftFeatures = compDef.Features.LoftFeatures;
+            var loftDef     = loftFeatures.CreateLoftDefinition(sections, operation);
+            var feature     = loftFeatures.Add(loftDef);
+
+            return new { FeatureName = feature.Name, Sketches = sketchNames, Operation = operation.ToString() };
+        }
+
+        private object CreateHole(Dictionary<string, object> payload)
+        {
+            var compDef     = GetPartCompDef();
+            var sketch      = GetActiveSketch();
+            var holeFeatures = compDef.Features.HoleFeatures;
+
+            string holeType  = payload != null && payload.ContainsKey("hole_type")
+                ? payload["hole_type"].ToString().ToLower() : "drilled";
+            string diamExpr  = BuildExpr(payload, "diameter", "10 mm");
+            string depthExpr = BuildExpr(payload, "depth", "20 mm");
+            bool throughAll  = payload != null && payload.ContainsKey("through")
+                && Convert.ToBoolean(payload["through"]);
+            var dir = PartFeatureExtentDirectionEnum.kNegativeExtentDirection;
+
+            // Collect placement points: prefer circle centers, else sketch points
+            var pts = _inventorApp.TransientObjects.CreateObjectCollection();
+            foreach (SketchCircle circle in sketch.SketchCircles)
+                if (!circle.Reference) pts.Add(circle.CenterSketchPoint);
+
+            if (pts.Count == 0)
+            {
+                // Skip index 1 (default origin point of the sketch)
+                for (int i = 2; i <= sketch.SketchPoints.Count; i++)
+                    pts.Add(sketch.SketchPoints[i]);
+            }
+
+            if (pts.Count == 0)
+                throw new Exception(
+                    "El boceto activo necesita círculos o puntos para ubicar los agujeros.");
+
+            var placement = holeFeatures.CreateSketchPlacementDefinition(pts);
+            HoleFeature hole;
+
+            if (holeType == "cbore")
+            {
+                string cboreDiam  = BuildExpr(payload, "cbore_diameter", "16 mm");
+                string cboreDepth = BuildExpr(payload, "cbore_depth", "5 mm");
+                hole = throughAll
+                    ? holeFeatures.AddCBoreByThroughAllExtent(placement, diamExpr, dir, cboreDiam, cboreDepth)
+                    : holeFeatures.AddCBoreByDistanceExtent(placement, diamExpr, depthExpr, dir, cboreDiam, cboreDepth, false, null);
+            }
+            else if (holeType == "csink")
+            {
+                string csinkDiam  = BuildExpr(payload, "csink_diameter", "18 mm");
+                string csinkAngle = BuildExpr(payload, "csink_angle", "90 deg", "deg");
+                hole = throughAll
+                    ? holeFeatures.AddCSinkByThroughAllExtent(placement, diamExpr, dir, csinkDiam, csinkAngle)
+                    : holeFeatures.AddCSinkByDistanceExtent(placement, diamExpr, depthExpr, dir, csinkDiam, csinkAngle, false, null);
+            }
+            else // drilled
+            {
+                hole = throughAll
+                    ? holeFeatures.AddDrilledByThroughAllExtent(placement, diamExpr, dir)
+                    : holeFeatures.AddDrilledByDistanceExtent(placement, diamExpr, depthExpr, dir, false, null);
+            }
+
+            return new { FeatureName = hole.Name, HoleType = holeType, Diameter = diamExpr };
         }
     }
 
