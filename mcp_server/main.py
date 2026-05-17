@@ -257,7 +257,7 @@ async def update_parameter(name: str, value: str) -> str:
         data = await execute_in_inventor(
             usuario, "update_parameter", {"name": name, "value": value}, timeout_seconds=30.0
         )
-        return f"Resultado: {data}"
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -270,7 +270,7 @@ async def export_to_step() -> str:
         return "Error: sesión no autenticada."
     try:
         data = await execute_in_inventor(usuario, "export_step", {}, timeout_seconds=60.0)
-        return f"Exportación completada: {data}"
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -284,7 +284,7 @@ async def create_line(x1: float, y1: float, x2: float, y2: float) -> str:
     try:
         payload = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
         data = await execute_in_inventor(usuario, "create_line", payload, timeout_seconds=30.0)
-        return f"Resultado: {data}"
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -298,7 +298,7 @@ async def create_circle(center_x: float, center_y: float, radius: float) -> str:
     try:
         payload = {"center_x": center_x, "center_y": center_y, "radius": radius}
         data = await execute_in_inventor(usuario, "create_circle", payload, timeout_seconds=30.0)
-        return f"Resultado: {data}"
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -380,7 +380,7 @@ async def save_document(path: str = "") -> str:
     try:
         payload = {"path": path} if path else {}
         data = await execute_in_inventor(usuario, "save_document", payload, timeout_seconds=30.0)
-        return str(data)
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -399,7 +399,7 @@ async def change_units(units: str) -> str:
         data = await execute_in_inventor(
             usuario, "change_units", {"units": units}, timeout_seconds=15.0
         )
-        return str(data)
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -419,7 +419,7 @@ async def set_material(material_name: str) -> str:
         data = await execute_in_inventor(
             usuario, "set_material", {"material_name": material_name}, timeout_seconds=30.0
         )
-        return str(data)
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -579,7 +579,7 @@ async def add_sketch_dimension(
         if entity2 >= 0:
             payload["entity2"] = entity2
         data = await execute_in_inventor(usuario, "add_sketch_dimension", payload, timeout_seconds=20.0)
-        return str(data)
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -614,7 +614,7 @@ async def add_sketch_constraint(
         if entity2 >= 0:
             payload["entity2"] = entity2
         data = await execute_in_inventor(usuario, "add_sketch_constraint", payload, timeout_seconds=20.0)
-        return str(data)
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -635,7 +635,7 @@ async def project_geometry(source: str = "origin") -> str:
         data = await execute_in_inventor(
             usuario, "project_geometry", {"source": source}, timeout_seconds=30.0
         )
-        return str(data)
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -648,7 +648,7 @@ async def close_sketch() -> str:
         return "Error: sesión no autenticada."
     try:
         data = await execute_in_inventor(usuario, "close_sketch", {}, timeout_seconds=15.0)
-        return str(data)
+        return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -814,6 +814,192 @@ async def create_hole(
             payload["csink_diameter"] = csink_diameter
             payload["csink_angle"] = csink_angle
         data = await execute_in_inventor(usuario, "create_hole", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+# ── Grupo: Modificación de sólidos ──────────────────────────────────────
+
+@mcp.tool()
+async def add_fillet(
+    radius: float,
+    edge_indices: str,
+    units: str = "mm",
+) -> str:
+    """Aplica un redondeo (fillet) de radio constante a una o más aristas del sólido activo.
+
+    Args:
+        radius:       Radio del redondeo.
+        edge_indices: Índices de las aristas a redondear, separados por coma (ej. '1,3,5').
+                      Los índices son base 1, referenciados al primer cuerpo sólido de la pieza.
+        units:        Unidad del radio: 'mm' (default), 'cm', 'in'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"radius": radius, "edge_indices": edge_indices, "units": units}
+        data = await execute_in_inventor(usuario, "add_fillet", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def add_chamfer(
+    distance: float,
+    edge_indices: str,
+    angle: float = 0.0,
+    units: str = "mm",
+) -> str:
+    """Aplica un chaflán (chamfer) a una o más aristas del sólido activo.
+
+    Args:
+        distance:     Distancia del chaflán.
+        edge_indices: Índices de las aristas a chaflanar, separados por coma (ej. '1,3').
+                      Los índices son base 1, referenciados al primer cuerpo sólido de la pieza.
+        angle:        Ángulo del chaflán en grados. 0 (default) usa modo distancia simétrica;
+                      si se especifica, usa modo distancia + ángulo.
+        units:        Unidad de la distancia: 'mm' (default), 'cm', 'in'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {"distance": distance, "edge_indices": edge_indices, "units": units}
+        if angle > 0:
+            payload["angle"] = angle
+        data = await execute_in_inventor(usuario, "add_chamfer", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def shell_solid(
+    thickness: float,
+    face_indices: str = "",
+    direction: str = "inside",
+    units: str = "mm",
+) -> str:
+    """Vacía el sólido activo dejando una pared delgada de espesor constante (Shell).
+
+    Args:
+        thickness:    Espesor de la pared resultante.
+        face_indices: Índices de las caras a eliminar (abrir), separados por coma (ej. '1,2').
+                      Los índices son base 1, referenciados al primer cuerpo sólido.
+                      Si se omite, todas las caras se conservan (cuerpo cerrado hueco).
+        direction:    'inside' (default, espesor hacia el interior) o 'outside' (hacia afuera).
+        units:        Unidad del espesor: 'mm' (default), 'cm', 'in'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {"thickness": thickness, "direction": direction, "units": units}
+        if face_indices:
+            payload["face_indices"] = face_indices
+        data = await execute_in_inventor(usuario, "shell_solid", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def thread_feature(
+    face_index: int,
+    designation: str = "",
+    thread_type: str = "ANSI Metric M Profile",
+    full_length: bool = True,
+    right_handed: bool = True,
+    cosmetic: bool = True,
+    length: float = 0.0,
+    units: str = "mm",
+) -> str:
+    """Aplica una rosca cosmética o física a una cara cilíndrica del sólido activo.
+
+    Args:
+        face_index:   Índice de la cara cilíndrica donde aplicar la rosca (base 1).
+        designation:  Designación de la rosca según el estándar. Ej: 'M8x1.25', 'M10x1.5'.
+                      Por defecto 'M6x1'.
+        thread_type:  Tipo de estándar de rosca. Ej: 'ANSI Metric M Profile',
+                      'ANSI Unified Screw Threads'. Por defecto 'ANSI Metric M Profile'.
+        full_length:  True (default) = rosca en toda la longitud de la cara.
+                      False = longitud controlada por el parámetro 'length'.
+        right_handed: True (default) = rosca a derechas. False = rosca a izquierdas.
+        cosmetic:     True (default) = rosca cosmética (solo visual).
+                      False = rosca física (modifica la geometría real del sólido).
+        length:       Longitud de la rosca en 'units' (solo si full_length=False).
+        units:        Unidad de longitud: 'mm' (default), 'cm', 'in'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {
+            "face_index": face_index,
+            "thread_type": thread_type,
+            "full_length": full_length,
+            "right_handed": right_handed,
+            "cosmetic": cosmetic,
+            "units": units,
+        }
+        if designation:
+            payload["designation"] = designation
+        if not full_length and length > 0:
+            payload["length"] = length
+        data = await execute_in_inventor(usuario, "thread_feature", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def split_body(
+    plane: str = "XY",
+    keep_both: bool = True,
+) -> str:
+    """Divide el cuerpo sólido activo usando un plano de trabajo.
+
+    Args:
+        plane:      Plano de división: 'XY', 'XZ' o 'YZ' (planos de origen), o el nombre
+                    exacto de cualquier plano de trabajo del documento.
+        keep_both:  True (default) = mantiene ambas partes como cuerpos sólidos separados.
+                    False = elimina la mitad del lado negativo del plano (recorte).
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"plane": plane, "keep_both": keep_both}
+        data = await execute_in_inventor(usuario, "split_body", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def combine_bodies(
+    operation: str = "join",
+    base_body: int = 1,
+    tool_bodies: str = "2",
+) -> str:
+    """Realiza una operación booleana entre cuerpos sólidos independientes de la pieza activa.
+
+    Args:
+        operation:   Operación booleana: 'join' (unión, default), 'cut' (resta),
+                     'intersect' (intersección).
+        base_body:   Índice del cuerpo sólido base (base 1). Por defecto 1.
+        tool_bodies: Índices de los cuerpos herramienta separados por coma (ej. '2,3').
+                     Por defecto '2'. Los cuerpos herramienta se consumen en la operación.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"operation": operation, "base_body": base_body, "tool_bodies": tool_bodies}
+        data = await execute_in_inventor(usuario, "combine_bodies", payload, timeout_seconds=30.0)
         return json.dumps(data, indent=2)
     except Exception as e:
         return f"Error: {str(e)}"
