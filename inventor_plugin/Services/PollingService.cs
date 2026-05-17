@@ -115,6 +115,24 @@ namespace InventorMCPBridge.Services
                     case "create_circle":
                         result = CreateCircle(task.Payload);
                         break;
+                    case "create_new_part":
+                        result = CreateNewPart(task.Payload);
+                        break;
+                    case "create_new_assembly":
+                        result = CreateNewAssembly(task.Payload);
+                        break;
+                    case "open_document":
+                        result = OpenDocument(task.Payload);
+                        break;
+                    case "save_document":
+                        result = SaveDocument(task.Payload);
+                        break;
+                    case "change_units":
+                        result = ChangeUnits(task.Payload);
+                        break;
+                    case "set_material":
+                        result = SetMaterial(task.Payload);
+                        break;
                     default:
                         error = $"Comando no reconocido: {task.Command}";
                         break;
@@ -250,6 +268,151 @@ namespace InventorMCPBridge.Services
 
             doc.SaveAs(stepPath, true);
             return $"Exportado a {stepPath}";
+        }
+
+        // ── Grupo: Inicialización y gestión de entorno ────────────────────
+
+        private string GetTemplatePath(DocumentTypeEnum docType, bool metric)
+        {
+            try
+            {
+                var sys = metric
+                    ? SystemOfMeasureEnum.kMetricSystemOfMeasure
+                    : SystemOfMeasureEnum.kEnglishSystemOfMeasure;
+                return _inventorApp.FileManager.GetTemplateFile(
+                    docType, sys, DraftingStandardEnum.kISO_DraftingStandard);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private object CreateNewPart(Dictionary<string, object> payload)
+        {
+            string units = payload != null && payload.ContainsKey("units")
+                ? payload["units"].ToString().ToLower() : "metric";
+            bool metric = units != "imperial";
+
+            string tpl = GetTemplatePath(DocumentTypeEnum.kPartDocumentObject, metric);
+            var doc = (PartDocument)_inventorApp.Documents.Add(
+                DocumentTypeEnum.kPartDocumentObject, tpl, true);
+
+            return new { DisplayName = doc.DisplayName, FullFileName = doc.FullFileName, Units = units };
+        }
+
+        private object CreateNewAssembly(Dictionary<string, object> payload)
+        {
+            string units = payload != null && payload.ContainsKey("units")
+                ? payload["units"].ToString().ToLower() : "metric";
+            bool metric = units != "imperial";
+
+            string tpl = GetTemplatePath(DocumentTypeEnum.kAssemblyDocumentObject, metric);
+            var doc = (AssemblyDocument)_inventorApp.Documents.Add(
+                DocumentTypeEnum.kAssemblyDocumentObject, tpl, true);
+
+            return new { DisplayName = doc.DisplayName, FullFileName = doc.FullFileName, Units = units };
+        }
+
+        private object OpenDocument(Dictionary<string, object> payload)
+        {
+            if (payload == null || !payload.ContainsKey("path"))
+                throw new Exception("Falta el parámetro 'path'");
+
+            string filePath = payload["path"].ToString();
+            if (!System.IO.File.Exists(filePath))
+                throw new Exception($"El archivo no existe: {filePath}");
+
+            var doc = _inventorApp.Documents.Open(filePath, true);
+            return new
+            {
+                DisplayName  = doc.DisplayName,
+                FullFileName = doc.FullFileName,
+                DocumentType = doc.DocumentType.ToString()
+            };
+        }
+
+        private object SaveDocument(Dictionary<string, object> payload)
+        {
+            var doc = _inventorApp.ActiveDocument;
+            if (doc == null) throw new Exception("No hay documento activo");
+
+            bool hasPath = payload != null && payload.ContainsKey("path")
+                && !string.IsNullOrWhiteSpace(payload["path"]?.ToString());
+
+            if (hasPath)
+            {
+                string savePath = payload["path"].ToString();
+                doc.SaveAs(savePath, false);
+                return $"Documento guardado en: {savePath}";
+            }
+
+            if (string.IsNullOrEmpty(doc.FullFileName))
+                throw new Exception(
+                    "El documento es nuevo y no tiene ruta. Proporciona el parámetro 'path'.");
+
+            doc.Save();
+            return $"Documento guardado: {doc.FullFileName}";
+        }
+
+        private object ChangeUnits(Dictionary<string, object> payload)
+        {
+            if (payload == null || !payload.ContainsKey("units"))
+                throw new Exception("Falta el parámetro 'units'. Válidos: mm, cm, m, in, ft");
+
+            var doc = _inventorApp.ActiveDocument;
+            if (doc == null) throw new Exception("No hay documento activo");
+
+            string units = payload["units"].ToString().ToLower().Trim();
+            UnitsTypeEnum unitType;
+            switch (units)
+            {
+                case "mm": unitType = UnitsTypeEnum.kMillimeterLengthUnits; break;
+                case "cm": unitType = UnitsTypeEnum.kCentimeterLengthUnits; break;
+                case "m":  unitType = UnitsTypeEnum.kMeterLengthUnits;      break;
+                case "in": unitType = UnitsTypeEnum.kInchLengthUnits;       break;
+                case "ft": unitType = UnitsTypeEnum.kFootLengthUnits;       break;
+                default:   throw new Exception($"Unidad '{units}' no válida. Usa: mm, cm, m, in, ft");
+            }
+
+            doc.UnitsOfMeasure.LengthUnits = unitType;
+            return $"Unidades de longitud cambiadas a '{units}'.";
+        }
+
+        private object SetMaterial(Dictionary<string, object> payload)
+        {
+            if (payload == null || !payload.ContainsKey("material_name"))
+                throw new Exception("Falta el parámetro 'material_name'");
+
+            var doc = _inventorApp.ActiveDocument;
+            if (!(doc is PartDocument partDoc))
+                throw new Exception("El documento activo debe ser una pieza (.ipt)");
+
+            string materialName = payload["material_name"].ToString();
+
+            // Search document-local materials first (fastest path)
+            foreach (Material mat in partDoc.Materials)
+            {
+                if (string.Compare(mat.Name, materialName, StringComparison.OrdinalIgnoreCase) == 0)
+                {
+                    partDoc.ComponentDefinition.Material = mat;
+                    return $"Material '{mat.Name}' asignado.";
+                }
+            }
+
+            // Fall back to global styles library
+            foreach (Material mat in _inventorApp.StylesManager.Materials)
+            {
+                if (string.Compare(mat.Name, materialName, StringComparison.OrdinalIgnoreCase) == 0)
+                {
+                    Material localMat = mat.ConvertToLocal();
+                    partDoc.ComponentDefinition.Material = localMat ?? mat;
+                    return $"Material '{mat.Name}' asignado desde biblioteca global.";
+                }
+            }
+
+            throw new Exception(
+                $"Material '{materialName}' no encontrado. Verifica el nombre exacto en Inventor.");
         }
     }
 

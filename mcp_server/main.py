@@ -303,6 +303,127 @@ async def create_circle(center_x: float, center_y: float, radius: float) -> str:
         return f"Error: {str(e)}"
 
 
+# ── Grupo: Inicialización y gestión de entorno ────────────────────────────
+
+@mcp.tool()
+async def create_new_part(units: str = "metric") -> str:
+    """Crea un nuevo documento de pieza (.ipt) en Inventor a partir de una plantilla.
+
+    Args:
+        units: Sistema de unidades de la plantilla: 'metric' (mm) o 'imperial' (pulgadas).
+               Por defecto 'metric'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(
+            usuario, "create_new_part", {"units": units}, timeout_seconds=30.0
+        )
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def create_new_assembly(units: str = "metric") -> str:
+    """Crea un nuevo documento de ensamble (.iam) en Inventor a partir de una plantilla.
+
+    Args:
+        units: Sistema de unidades de la plantilla: 'metric' (mm) o 'imperial' (pulgadas).
+               Por defecto 'metric'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(
+            usuario, "create_new_assembly", {"units": units}, timeout_seconds=30.0
+        )
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def open_document(path: str) -> str:
+    """Abre un documento de Inventor existente desde una ruta de archivo completa.
+
+    Args:
+        path: Ruta completa al archivo a abrir (.ipt, .iam, .idw, etc.).
+              Ejemplo: 'C:/Users/User/Documents/pieza.ipt'
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(
+            usuario, "open_document", {"path": path}, timeout_seconds=30.0
+        )
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def save_document(path: str = "") -> str:
+    """Guarda el documento activo en Inventor.
+
+    Args:
+        path: Ruta completa donde guardar el archivo. Si se omite, guarda en la ubicación
+              actual del documento. Requerido si el documento es nuevo y nunca ha sido guardado.
+              Ejemplo: 'C:/Users/User/Documents/pieza.ipt'
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"path": path} if path else {}
+        data = await execute_in_inventor(usuario, "save_document", payload, timeout_seconds=30.0)
+        return str(data)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def change_units(units: str) -> str:
+    """Cambia las unidades de longitud del documento activo en Inventor.
+
+    Args:
+        units: Unidad de longitud a aplicar. Valores válidos: 'mm', 'cm', 'm', 'in', 'ft'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(
+            usuario, "change_units", {"units": units}, timeout_seconds=15.0
+        )
+        return str(data)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def set_material(material_name: str) -> str:
+    """Asigna un material de la biblioteca de Inventor a la pieza activa.
+
+    Args:
+        material_name: Nombre exacto del material en la biblioteca de Inventor.
+                       Ejemplos: 'Steel', 'Aluminum 6061', 'Copper', 'ABS Plastic', 'Acero'.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(
+            usuario, "set_material", {"material_name": material_name}, timeout_seconds=30.0
+        )
+        return str(data)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
 # =========================================================================
 # ENDPOINTS DE INFRAESTRUCTURA + SSE
 # All explicit routes must be registered BEFORE app.mount() calls so that
