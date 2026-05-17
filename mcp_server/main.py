@@ -424,6 +424,235 @@ async def set_material(material_name: str) -> str:
         return f"Error: {str(e)}"
 
 
+# ── Grupo: Bocetado 2D / Sketching ───────────────────────────────────────
+
+@mcp.tool()
+async def create_sketch(plane: str = "XY", name: str = "") -> str:
+    """Crea un nuevo boceto 2D en el plano de origen especificado.
+
+    Args:
+        plane: Plano de origen donde crear el boceto: 'XY', 'XZ' o 'YZ'. Por defecto 'XY'.
+        name:  Nombre opcional para el boceto. Si se omite, Inventor asigna uno automático.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"plane": plane}
+        if name:
+            payload["name"] = name
+        data = await execute_in_inventor(usuario, "create_sketch", payload, timeout_seconds=20.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def draw_rectangle(
+    x1: float = 0, y1: float = 0, x2: float = 0, y2: float = 0,
+    mode: str = "twopoint",
+    cx: float = 0, cy: float = 0, px: float = 0, py: float = 0,
+) -> str:
+    """Dibuja un rectángulo en el boceto activo.
+
+    Modos disponibles:
+      - 'twopoint' (default): dos esquinas opuestas. Parámetros: x1,y1 (esquina 1) y x2,y2 (esquina 2).
+      - 'centered': centro y punto de esquina. Parámetros: cx,cy (centro) y px,py (esquina).
+
+    Retorna los índices de entidad de las 4 líneas creadas.
+    Los valores de coordenadas están en las unidades del documento (normalmente cm internamente en Inventor).
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        if mode == "centered":
+            payload = {"mode": "centered", "cx": cx, "cy": cy, "px": px, "py": py}
+        else:
+            payload = {"mode": "twopoint", "x1": x1, "y1": y1, "x2": x2, "y2": y2}
+        data = await execute_in_inventor(usuario, "draw_rectangle", payload, timeout_seconds=20.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def draw_arc(
+    mode: str = "threepoints",
+    x1: float = 0, y1: float = 0,
+    x2: float = 0, y2: float = 0,
+    x3: float = 0, y3: float = 0,
+    cx: float = 0, cy: float = 0,
+    clockwise: bool = False,
+) -> str:
+    """Dibuja un arco en el boceto activo.
+
+    Modos disponibles:
+      - 'threepoints' (default): arco que pasa por tres puntos.
+        Parámetros: x1,y1 (inicio), x2,y2 (punto intermedio), x3,y3 (fin).
+      - 'center': arco por centro y extremos.
+        Parámetros: cx,cy (centro), x1,y1 (inicio), x2,y2 (fin), clockwise (sentido).
+
+    Retorna el índice de entidad del arco.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        if mode == "center":
+            payload = {"mode": "center", "cx": cx, "cy": cy,
+                       "x1": x1, "y1": y1, "x2": x2, "y2": y2, "clockwise": clockwise}
+        else:
+            payload = {"mode": "threepoints",
+                       "x1": x1, "y1": y1, "x2": x2, "y2": y2, "x3": x3, "y3": y3}
+        data = await execute_in_inventor(usuario, "draw_arc", payload, timeout_seconds=20.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def draw_slot(
+    cx1: float, cy1: float,
+    cx2: float, cy2: float,
+    width: float,
+) -> str:
+    """Dibuja una ranura (slot) recta en el boceto activo por dos centros y ancho.
+
+    Args:
+        cx1, cy1: Coordenadas del centro del primer semicírculo.
+        cx2, cy2: Coordenadas del centro del segundo semicírculo.
+        width:    Ancho total de la ranura (diámetro de los semicírculos).
+
+    Retorna los índices de las entidades creadas.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {"cx1": cx1, "cy1": cy1, "cx2": cx2, "cy2": cy2, "width": width}
+        data = await execute_in_inventor(usuario, "draw_slot", payload, timeout_seconds=20.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def add_sketch_dimension(
+    type: str,
+    entity_index: int = -1,
+    entity1: int = -1,
+    entity2: int = -1,
+    value: float = 0,
+    units: str = "mm",
+    orientation: str = "aligned",
+    text_x: float = 1.0,
+    text_y: float = 1.0,
+    driven: bool = False,
+) -> str:
+    """Agrega una cota paramétrica a una entidad del boceto activo.
+
+    Args:
+        type:         Tipo de cota: 'line' (longitud de línea), 'radius', 'diameter',
+                      'distance' (entre dos líneas).
+        entity_index: Índice de la entidad (para line, radius, diameter).
+        entity1:      Índice de la primera entidad (para distance).
+        entity2:      Índice de la segunda entidad (para distance).
+        value:        Valor numérico de la cota (0 = mantener tamaño actual).
+        units:        Unidad del valor: 'mm', 'cm', 'm', 'in'. Por defecto 'mm'.
+        orientation:  Para 'distance': 'aligned', 'horizontal' o 'vertical'.
+        text_x, text_y: Posición del texto de la cota en el boceto.
+        driven:       True = cota de referencia (no controla geometría).
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {"type": type, "units": units, "orientation": orientation,
+                         "text_x": text_x, "text_y": text_y, "driven": driven}
+        if value != 0:
+            payload["value"] = value
+        if entity_index >= 0:
+            payload["entity_index"] = entity_index
+        if entity1 >= 0:
+            payload["entity1"] = entity1
+        if entity2 >= 0:
+            payload["entity2"] = entity2
+        data = await execute_in_inventor(usuario, "add_sketch_dimension", payload, timeout_seconds=20.0)
+        return str(data)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def add_sketch_constraint(
+    type: str,
+    entity_index: int = -1,
+    entity1: int = -1,
+    entity2: int = -1,
+) -> str:
+    """Aplica una restricción geométrica a entidades del boceto activo.
+
+    Args:
+        type: Tipo de restricción:
+              - 'horizontal' o 'vertical': requiere entity_index (línea).
+              - 'tangent', 'coincident', 'parallel', 'perpendicular',
+                'equal_length', 'concentric': requieren entity1 y entity2.
+        entity_index: Índice de la entidad (para horizontal/vertical).
+        entity1:      Índice de la primera entidad.
+        entity2:      Índice de la segunda entidad.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {"type": type}
+        if entity_index >= 0:
+            payload["entity_index"] = entity_index
+        if entity1 >= 0:
+            payload["entity1"] = entity1
+        if entity2 >= 0:
+            payload["entity2"] = entity2
+        data = await execute_in_inventor(usuario, "add_sketch_constraint", payload, timeout_seconds=20.0)
+        return str(data)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def project_geometry(source: str = "origin") -> str:
+    """Proyecta geometría existente al boceto activo como referencias.
+
+    Args:
+        source: Fuente de la geometría a proyectar:
+                - 'origin' (default): proyecta el punto de origen y los ejes X e Y.
+                - 'model': proyecta todas las aristas del primer cuerpo sólido.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(
+            usuario, "project_geometry", {"source": source}, timeout_seconds=30.0
+        )
+        return str(data)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def close_sketch() -> str:
+    """Cierra el boceto activo y lo deja listo para operaciones 3D (extrusión, revolución, etc.)."""
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(usuario, "close_sketch", {}, timeout_seconds=15.0)
+        return str(data)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
 # =========================================================================
 # ENDPOINTS DE INFRAESTRUCTURA + SSE
 # All explicit routes must be registered BEFORE app.mount() calls so that

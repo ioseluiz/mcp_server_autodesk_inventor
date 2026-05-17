@@ -18,6 +18,8 @@ namespace InventorMCPBridge.Services
         private readonly HttpClient _client;
         private CancellationTokenSource _cts;
         private bool _isRunning;
+        private PlanarSketch _activeSketch;
+        private List<SketchEntity> _sketchEntities = new List<SketchEntity>();
 
         public PollingService(Application inventorApp, string baseUrl, string apiKey, string userId)
         {
@@ -132,6 +134,30 @@ namespace InventorMCPBridge.Services
                         break;
                     case "set_material":
                         result = SetMaterial(task.Payload);
+                        break;
+                    case "create_sketch":
+                        result = CreateSketch(task.Payload);
+                        break;
+                    case "draw_rectangle":
+                        result = DrawRectangle(task.Payload);
+                        break;
+                    case "draw_arc":
+                        result = DrawArc(task.Payload);
+                        break;
+                    case "draw_slot":
+                        result = DrawSlot(task.Payload);
+                        break;
+                    case "add_sketch_dimension":
+                        result = AddSketchDimension(task.Payload);
+                        break;
+                    case "add_sketch_constraint":
+                        result = AddSketchConstraint(task.Payload);
+                        break;
+                    case "project_geometry":
+                        result = ProjectGeometry(task.Payload);
+                        break;
+                    case "close_sketch":
+                        result = CloseSketch(task.Payload);
                         break;
                     default:
                         error = $"Comando no reconocido: {task.Command}";
@@ -413,6 +439,351 @@ namespace InventorMCPBridge.Services
 
             throw new Exception(
                 $"Material '{materialName}' no encontrado. Verifica el nombre exacto en Inventor.");
+        }
+
+        // ── Grupo: Bocetado 2D / Sketching ───────────────────────────────
+
+        private PlanarSketch GetActiveSketch()
+        {
+            if (_activeSketch == null)
+                throw new Exception("No hay boceto activo. Usa 'create_sketch' primero.");
+            return _activeSketch;
+        }
+
+        private int TrackEntity(SketchEntity entity)
+        {
+            _sketchEntities.Add(entity);
+            return _sketchEntities.Count - 1;
+        }
+
+        private SketchEntity GetEntity(int index)
+        {
+            if (index < 0 || index >= _sketchEntities.Count)
+                throw new Exception($"Entidad {index} fuera de rango (0–{_sketchEntities.Count - 1}).");
+            return _sketchEntities[index];
+        }
+
+        private WorkPlane FindOriginPlane(PartComponentDefinition compDef, string planeName)
+        {
+            string search = planeName.ToUpper().Trim();
+            foreach (WorkPlane wp in compDef.WorkPlanes)
+            {
+                if (wp.Name.ToUpper().Replace(" ", "").Contains(search))
+                    return wp;
+            }
+            switch (search)
+            {
+                case "XY": return compDef.WorkPlanes[1];
+                case "XZ": return compDef.WorkPlanes[2];
+                case "YZ": return compDef.WorkPlanes[3];
+                default:   throw new Exception($"Plano '{planeName}' no reconocido. Usa: XY, XZ, YZ");
+            }
+        }
+
+        private object CreateSketch(Dictionary<string, object> payload)
+        {
+            var doc = _inventorApp.ActiveDocument;
+            if (!(doc is PartDocument partDoc))
+                throw new Exception("El documento activo debe ser una pieza (.ipt)");
+
+            string planeName = payload != null && payload.ContainsKey("plane")
+                ? payload["plane"].ToString().ToUpper() : "XY";
+            string sketchName = payload != null && payload.ContainsKey("name")
+                ? payload["name"].ToString() : "";
+
+            var compDef = partDoc.ComponentDefinition;
+            WorkPlane workPlane = FindOriginPlane(compDef, planeName);
+
+            _activeSketch = compDef.Sketches.Add(workPlane);
+            _sketchEntities.Clear();
+
+            if (!string.IsNullOrWhiteSpace(sketchName))
+                _activeSketch.Name = sketchName;
+
+            return new { SketchName = _activeSketch.Name, Plane = planeName };
+        }
+
+        private object DrawRectangle(Dictionary<string, object> payload)
+        {
+            var sketch = GetActiveSketch();
+            var tg = _inventorApp.TransientGeometry;
+
+            string mode = payload != null && payload.ContainsKey("mode")
+                ? payload["mode"].ToString().ToLower() : "twopoint";
+
+            SketchEntitiesEnumerator lines;
+            if (mode == "centered")
+            {
+                double cx = Convert.ToDouble(payload["cx"]);
+                double cy = Convert.ToDouble(payload["cy"]);
+                double px = Convert.ToDouble(payload["px"]);
+                double py = Convert.ToDouble(payload["py"]);
+                lines = sketch.SketchLines.AddAsTwoPointCenteredRectangle(
+                    tg.CreatePoint2d(cx, cy), tg.CreatePoint2d(px, py));
+            }
+            else
+            {
+                double x1 = Convert.ToDouble(payload["x1"]);
+                double y1 = Convert.ToDouble(payload["y1"]);
+                double x2 = Convert.ToDouble(payload["x2"]);
+                double y2 = Convert.ToDouble(payload["y2"]);
+                lines = sketch.SketchLines.AddAsTwoPointRectangle(
+                    tg.CreatePoint2d(x1, y1), tg.CreatePoint2d(x2, y2));
+            }
+
+            var indices = new List<int>();
+            foreach (SketchEntity entity in lines)
+                indices.Add(TrackEntity(entity));
+
+            return new { EntityIndices = indices, Type = "rectangle", Count = indices.Count };
+        }
+
+        private object DrawArc(Dictionary<string, object> payload)
+        {
+            var sketch = GetActiveSketch();
+            var tg = _inventorApp.TransientGeometry;
+
+            string mode = payload != null && payload.ContainsKey("mode")
+                ? payload["mode"].ToString().ToLower() : "threepoints";
+
+            SketchArc arc;
+            if (mode == "center")
+            {
+                double cx = Convert.ToDouble(payload["cx"]);
+                double cy = Convert.ToDouble(payload["cy"]);
+                double x1 = Convert.ToDouble(payload["x1"]);
+                double y1 = Convert.ToDouble(payload["y1"]);
+                double x2 = Convert.ToDouble(payload["x2"]);
+                double y2 = Convert.ToDouble(payload["y2"]);
+                bool clockwise = payload.ContainsKey("clockwise") && Convert.ToBoolean(payload["clockwise"]);
+                arc = sketch.SketchArcs.AddByCenterStartEndPoint(
+                    tg.CreatePoint2d(cx, cy),
+                    tg.CreatePoint2d(x1, y1),
+                    tg.CreatePoint2d(x2, y2),
+                    clockwise);
+            }
+            else
+            {
+                double x1 = Convert.ToDouble(payload["x1"]);
+                double y1 = Convert.ToDouble(payload["y1"]);
+                double x2 = Convert.ToDouble(payload["x2"]);
+                double y2 = Convert.ToDouble(payload["y2"]);
+                double x3 = Convert.ToDouble(payload["x3"]);
+                double y3 = Convert.ToDouble(payload["y3"]);
+                arc = sketch.SketchArcs.AddByThreePoints(
+                    tg.CreatePoint2d(x1, y1),
+                    tg.CreatePoint2d(x2, y2),
+                    tg.CreatePoint2d(x3, y3));
+            }
+
+            // SketchArc → SketchEntity via COM QueryInterface (double cast through object)
+            int index = TrackEntity((SketchEntity)(object)arc);
+            return new { EntityIndex = index, Type = "arc" };
+        }
+
+        private object DrawSlot(Dictionary<string, object> payload)
+        {
+            var sketch = GetActiveSketch();
+            var tg = _inventorApp.TransientGeometry;
+
+            double cx1   = Convert.ToDouble(payload["cx1"]);
+            double cy1   = Convert.ToDouble(payload["cy1"]);
+            double cx2   = Convert.ToDouble(payload["cx2"]);
+            double cy2   = Convert.ToDouble(payload["cy2"]);
+            double width = Convert.ToDouble(payload["width"]);
+
+            var entities = sketch.AddStraightSlotByCenterToCenter(
+                tg.CreatePoint2d(cx1, cy1), tg.CreatePoint2d(cx2, cy2), width);
+
+            var indices = new List<int>();
+            foreach (SketchEntity entity in entities)
+                indices.Add(TrackEntity(entity));
+
+            return new { EntityIndices = indices, Type = "slot", Count = indices.Count };
+        }
+
+        private object AddSketchDimension(Dictionary<string, object> payload)
+        {
+            var sketch = GetActiveSketch();
+            var tg = _inventorApp.TransientGeometry;
+
+            string dimType  = payload["type"].ToString().ToLower();
+            double tx       = payload.ContainsKey("text_x") ? Convert.ToDouble(payload["text_x"]) : 1.0;
+            double ty       = payload.ContainsKey("text_y") ? Convert.ToDouble(payload["text_y"]) : 1.0;
+            Point2d textPt  = tg.CreatePoint2d(tx, ty);
+            bool driven     = payload.ContainsKey("driven") && Convert.ToBoolean(payload["driven"]);
+            string valExpr  = null;
+            if (payload.ContainsKey("value"))
+            {
+                string units = payload.ContainsKey("units") ? payload["units"].ToString() : "mm";
+                valExpr = payload["value"].ToString() + " " + units;
+            }
+
+            switch (dimType)
+            {
+                case "line":
+                case "length":
+                {
+                    int idx = Convert.ToInt32(payload["entity_index"]);
+                    if (!(GetEntity(idx) is SketchLine line))
+                        throw new Exception($"La entidad {idx} no es una línea.");
+                    var dim = sketch.DimensionConstraints.AddTwoPointDistance(
+                        line.StartSketchPoint, line.EndSketchPoint,
+                        DimensionOrientationEnum.kAlignedDim, textPt, driven);
+                    if (valExpr != null) dim.Parameter.Expression = valExpr;
+                    return $"Cota de longitud en línea {idx}" + (valExpr != null ? $" = {valExpr}" : "");
+                }
+                case "radius":
+                {
+                    int idx = Convert.ToInt32(payload["entity_index"]);
+                    var dim = sketch.DimensionConstraints.AddRadius(GetEntity(idx), textPt, driven);
+                    if (valExpr != null) dim.Parameter.Expression = valExpr;
+                    return $"Cota de radio en entidad {idx}" + (valExpr != null ? $" = {valExpr}" : "");
+                }
+                case "diameter":
+                {
+                    int idx = Convert.ToInt32(payload["entity_index"]);
+                    var dim = sketch.DimensionConstraints.AddDiameter(GetEntity(idx), textPt, driven);
+                    if (valExpr != null) dim.Parameter.Expression = valExpr;
+                    return $"Cota de diámetro en entidad {idx}" + (valExpr != null ? $" = {valExpr}" : "");
+                }
+                case "distance":
+                {
+                    int idx1 = Convert.ToInt32(payload["entity1"]);
+                    int idx2 = Convert.ToInt32(payload["entity2"]);
+                    if (!(GetEntity(idx1) is SketchLine l1))
+                        throw new Exception($"Entidad {idx1} debe ser una línea.");
+                    if (!(GetEntity(idx2) is SketchLine l2))
+                        throw new Exception($"Entidad {idx2} debe ser una línea.");
+                    string ori = payload.ContainsKey("orientation")
+                        ? payload["orientation"].ToString().ToLower() : "aligned";
+                    var orient = ori == "horizontal" ? DimensionOrientationEnum.kHorizontalDim
+                        : ori == "vertical" ? DimensionOrientationEnum.kVerticalDim
+                        : DimensionOrientationEnum.kAlignedDim;
+                    var dim = sketch.DimensionConstraints.AddTwoPointDistance(
+                        l1.StartSketchPoint, l2.StartSketchPoint, orient, textPt, driven);
+                    if (valExpr != null) dim.Parameter.Expression = valExpr;
+                    return $"Cota de distancia entre entidades {idx1} y {idx2}" + (valExpr != null ? $" = {valExpr}" : "");
+                }
+                default:
+                    throw new Exception($"Tipo '{dimType}' no reconocido. Usa: line, radius, diameter, distance");
+            }
+        }
+
+        private object AddSketchConstraint(Dictionary<string, object> payload)
+        {
+            var sketch = GetActiveSketch();
+            string ctype = payload["type"].ToString().ToLower();
+
+            switch (ctype)
+            {
+                case "horizontal":
+                {
+                    int idx = Convert.ToInt32(payload["entity_index"]);
+                    sketch.GeometricConstraints.AddHorizontal(GetEntity(idx), false);
+                    return $"Restricción horizontal en entidad {idx}.";
+                }
+                case "vertical":
+                {
+                    int idx = Convert.ToInt32(payload["entity_index"]);
+                    sketch.GeometricConstraints.AddVertical(GetEntity(idx), false);
+                    return $"Restricción vertical en entidad {idx}.";
+                }
+                case "tangent":
+                {
+                    int idx1 = Convert.ToInt32(payload["entity1"]);
+                    int idx2 = Convert.ToInt32(payload["entity2"]);
+                    sketch.GeometricConstraints.AddTangent(GetEntity(idx1), GetEntity(idx2), null);
+                    return $"Restricción tangente entre entidades {idx1} y {idx2}.";
+                }
+                case "coincident":
+                {
+                    int idx1 = Convert.ToInt32(payload["entity1"]);
+                    int idx2 = Convert.ToInt32(payload["entity2"]);
+                    sketch.GeometricConstraints.AddCoincident(GetEntity(idx1), GetEntity(idx2));
+                    return $"Restricción coincidente entre entidades {idx1} y {idx2}.";
+                }
+                case "parallel":
+                {
+                    int idx1 = Convert.ToInt32(payload["entity1"]);
+                    int idx2 = Convert.ToInt32(payload["entity2"]);
+                    sketch.GeometricConstraints.AddParallel(GetEntity(idx1), GetEntity(idx2), false, false);
+                    return $"Restricción paralela entre entidades {idx1} y {idx2}.";
+                }
+                case "perpendicular":
+                {
+                    int idx1 = Convert.ToInt32(payload["entity1"]);
+                    int idx2 = Convert.ToInt32(payload["entity2"]);
+                    sketch.GeometricConstraints.AddPerpendicular(GetEntity(idx1), GetEntity(idx2), false, false);
+                    return $"Restricción perpendicular entre entidades {idx1} y {idx2}.";
+                }
+                case "equal":
+                case "equal_length":
+                {
+                    int idx1 = Convert.ToInt32(payload["entity1"]);
+                    int idx2 = Convert.ToInt32(payload["entity2"]);
+                    if (!(GetEntity(idx1) is SketchLine l1))
+                        throw new Exception($"Entidad {idx1} debe ser una línea.");
+                    if (!(GetEntity(idx2) is SketchLine l2))
+                        throw new Exception($"Entidad {idx2} debe ser una línea.");
+                    sketch.GeometricConstraints.AddEqualLength(l1, l2);
+                    return $"Restricción igual longitud entre entidades {idx1} y {idx2}.";
+                }
+                case "concentric":
+                {
+                    int idx1 = Convert.ToInt32(payload["entity1"]);
+                    int idx2 = Convert.ToInt32(payload["entity2"]);
+                    sketch.GeometricConstraints.AddConcentric(GetEntity(idx1), GetEntity(idx2));
+                    return $"Restricción concéntrica entre entidades {idx1} y {idx2}.";
+                }
+                default:
+                    throw new Exception(
+                        $"Restricción '{ctype}' no reconocida. Usa: horizontal, vertical, tangent, coincident, parallel, perpendicular, equal_length, concentric");
+            }
+        }
+
+        private object ProjectGeometry(Dictionary<string, object> payload)
+        {
+            var sketch = GetActiveSketch();
+            var doc = _inventorApp.ActiveDocument;
+            if (!(doc is PartDocument partDoc))
+                throw new Exception("El documento activo debe ser una pieza (.ipt)");
+
+            var compDef = partDoc.ComponentDefinition;
+            string source = payload != null && payload.ContainsKey("source")
+                ? payload["source"].ToString().ToLower() : "origin";
+
+            int count = 0;
+            if (source == "model")
+            {
+                if (compDef.SurfaceBodies.Count == 0)
+                    throw new Exception("La pieza no tiene cuerpo sólido para proyectar.");
+                foreach (Edge edge in compDef.SurfaceBodies[1].Edges)
+                {
+                    try { sketch.AddByProjectingEntity(edge); count++; } catch { }
+                }
+            }
+            else // "origin"
+            {
+                try { sketch.AddByProjectingEntity(compDef.WorkPoints[1]); count++; } catch { }
+                try { sketch.AddByProjectingEntity(compDef.WorkAxes[1]);   count++; } catch { }
+                try { sketch.AddByProjectingEntity(compDef.WorkAxes[2]);   count++; } catch { }
+            }
+
+            return $"{count} elemento(s) proyectados desde '{source}' al boceto.";
+        }
+
+        private object CloseSketch(Dictionary<string, object> payload)
+        {
+            if (_activeSketch == null)
+                throw new Exception("No hay boceto activo.");
+
+            string name = _activeSketch.Name;
+            try { _activeSketch.ExitEdit(); } catch { }
+            _activeSketch = null;
+            _sketchEntities.Clear();
+
+            return $"Boceto '{name}' cerrado y listo para operaciones 3D.";
         }
     }
 
