@@ -1431,6 +1431,192 @@ async def get_mass_properties() -> str:
         return f"Error: {str(e)}"
 
 
+# ── Grupo: Ensambles ────────────────────────────────────────────────────
+
+@mcp.tool()
+async def insert_component(file_path: str) -> str:
+    """Inserta una pieza (.ipt) o subensamble (.iam) en el ensamble activo.
+
+    El componente se coloca en el origen (0,0,0) con orientación por defecto.
+    Después de insertar, usa ground_component para fijar la base o
+    add_assembly_constraint / add_assembly_joint para posicionarlo.
+
+    Args:
+        file_path: Ruta completa al archivo a insertar (.ipt o .iam).
+                   Ejemplo: 'C:/Parts/bolt.ipt'
+
+    Devuelve: OccurrenceName (nombre en el árbol del ensamble, ej. 'Bolt:1'),
+              OccurrenceIndex (índice 1-based para usar en otras tools),
+              FilePath, Grounded, TotalOccurrences.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(
+            usuario, "insert_component", {"file_path": file_path}, timeout_seconds=30.0
+        )
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def ground_component(occurrence: str, ground: bool = True) -> str:
+    """Fija (o libera) un componente en el espacio para que sirva como base fija del ensamble.
+
+    Un componente fijado (grounded) no puede moverse por restricciones o joints.
+    Se recomienda fijar el primer componente base antes de añadir restricciones.
+
+    Args:
+        occurrence: Nombre (ej. 'Base:1') o índice 1-based del componente en el ensamble.
+        ground:     True (default) = fijar el componente. False = liberar (desfijar).
+
+    Devuelve: OccurrenceName, OccurrenceIndex, Grounded, TotalOccurrences.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(
+            usuario, "ground_component",
+            {"occurrence": occurrence, "ground": ground},
+            timeout_seconds=15.0,
+        )
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def add_assembly_constraint(
+    occurrence1: str,
+    occurrence2: str,
+    constraint_type: str = "mate",
+    face1: int = 1,
+    face2: int = 1,
+    value: float = 0.0,
+    units: str = "mm",
+    inside: bool = False,
+    axes_opposed: bool = True,
+) -> str:
+    """Aplica una restricción de ensamble tradicional entre dos componentes.
+
+    Las restricciones alinean caras, ejes o planos de dos componentes.
+    Cada componente debe estar ya insertado (usa insert_component primero).
+
+    Tipos de restricción disponibles:
+      - 'mate':    Dos caras planas se tocan (o con offset). El tipo más común.
+      - 'flush':   Dos caras planas quedan coplanares (o con offset).
+      - 'angle':   Ángulo fijo entre dos caras. El parámetro 'value' es el ángulo en grados.
+      - 'tangent': Una cara curva tangente a otra. 'inside=True' para tangencia interior.
+      - 'insert':  Alinea eje cilíndrico y cara simultáneamente (para tornillos en agujeros).
+                   'axes_opposed=True' para orientar los ejes en sentido contrario.
+
+    Args:
+        occurrence1:     Nombre o índice 1-based del primer componente.
+        occurrence2:     Nombre o índice 1-based del segundo componente.
+        constraint_type: Tipo: 'mate', 'flush', 'angle', 'tangent', 'insert'. Default 'mate'.
+        face1:           Índice 1-based de la cara del primer componente. Default 1.
+        face2:           Índice 1-based de la cara del segundo componente. Default 1.
+        value:           Offset (mate/flush/tangent/insert en units) o ángulo (angle en grados).
+        units:           Unidad del offset: 'mm' (default), 'cm', 'm', 'in'.
+        inside:          Solo para 'tangent': True = tangencia interior.
+        axes_opposed:    Solo para 'insert': True (default) = ejes opuestos.
+
+    Devuelve: ConstraintName, EntityOne, EntityTwo, Value, Units, TotalConstraints.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload: dict = {
+            "occurrence1":     occurrence1,
+            "occurrence2":     occurrence2,
+            "constraint_type": constraint_type,
+            "face1":           face1,
+            "face2":           face2,
+            "value":           value,
+            "units":           units,
+            "inside":          inside,
+            "axes_opposed":    axes_opposed,
+        }
+        data = await execute_in_inventor(usuario, "add_assembly_constraint", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def add_assembly_joint(
+    occurrence1: str,
+    occurrence2: str,
+    joint_type: str = "rigid",
+    face1: int = 1,
+    face2: int = 1,
+) -> str:
+    """Conecta dos componentes con un Joint del sistema moderno de ensamble de Inventor.
+
+    Los Joints definen la relación cinemática entre dos componentes: cuántos grados
+    de libertad conservan (movimiento de simulación, análisis de mecanismos).
+
+    Tipos de joint disponibles:
+      - 'rigid':       Sin grados de libertad — los componentes se mueven juntos.
+      - 'rotational':  Un grado de libertad de rotación (bisagra, pin).
+      - 'sliding':     Un grado de libertad de traslación (guía lineal).
+      - 'cylindrical': Rotación + traslación en el mismo eje (tornillo sin rosca modelada).
+      - 'planar':      Traslación en dos ejes + rotación sobre el eje normal.
+      - 'ball':        Tres grados de libertad de rotación (rótula).
+
+    Args:
+        occurrence1: Nombre o índice 1-based del primer componente.
+        occurrence2: Nombre o índice 1-based del segundo componente.
+        joint_type:  Tipo de joint (ver lista). Default 'rigid'.
+        face1:       Índice 1-based de la cara del primer componente para el origen del joint.
+        face2:       Índice 1-based de la cara del segundo componente para el origen del joint.
+
+    Devuelve: JointName, JointType, ComponentOne, ComponentTwo, TotalJoints.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        payload = {
+            "occurrence1": occurrence1,
+            "occurrence2": occurrence2,
+            "joint_type":  joint_type,
+            "face1":       face1,
+            "face2":       face2,
+        }
+        data = await execute_in_inventor(usuario, "add_assembly_joint", payload, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def get_assembly_bom() -> str:
+    """Extrae la lista de materiales (BOM) del ensamble activo.
+
+    Devuelve la vista estructurada del BOM con número de ítem, cantidad y
+    nombre de cada componente. Útil para verificar el contenido del ensamble
+    y generar documentación o listas de compra.
+
+    Requiere que el documento activo sea un ensamble (.iam).
+
+    Devuelve: DocumentName, ViewType, TotalItems y BOMItems con:
+              ItemNumber, Quantity, PartName, FileName.
+    """
+    usuario = current_user_id.get(None)
+    if not usuario:
+        return "Error: sesión no autenticada."
+    try:
+        data = await execute_in_inventor(usuario, "get_assembly_bom", {}, timeout_seconds=30.0)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
 # ── Grupo: Patrones y simetría ──────────────────────────────────────────
 
 @mcp.tool()

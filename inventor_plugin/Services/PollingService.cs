@@ -240,6 +240,21 @@ namespace InventorMCPBridge.Services
                     case "create_work_point":
                         result = CreateWorkPoint(task.Payload);
                         break;
+                    case "insert_component":
+                        result = InsertComponent(task.Payload);
+                        break;
+                    case "ground_component":
+                        result = GroundComponent(task.Payload);
+                        break;
+                    case "add_assembly_constraint":
+                        result = AddAssemblyConstraint(task.Payload);
+                        break;
+                    case "add_assembly_joint":
+                        result = AddAssemblyJoint(task.Payload);
+                        break;
+                    case "get_assembly_bom":
+                        result = GetAssemblyBOM(task.Payload);
+                        break;
                     default:
                         error = $"Comando no reconocido: {task.Command}";
                         break;
@@ -2523,6 +2538,270 @@ namespace InventorMCPBridge.Services
                 WorkPointCount  = totalPoints,
                 Mode            = mode,
                 Description     = description
+            };
+        }
+        // ──────────────────────────────────────────────────────────────
+        // Grupo: Ensambles
+        // ──────────────────────────────────────────────────────────────
+
+        private ComponentOccurrence FindOccurrence(AssemblyComponentDefinition compDef, string nameOrIndex)
+        {
+            if (int.TryParse(nameOrIndex, out int idx))
+                return compDef.Occurrences[idx];
+
+            foreach (ComponentOccurrence occ in compDef.Occurrences)
+                if (string.Compare(occ.Name, nameOrIndex, StringComparison.OrdinalIgnoreCase) == 0)
+                    return occ;
+
+            throw new Exception($"Componente '{nameOrIndex}' no encontrado. Verifica el nombre con get_active_document_info.");
+        }
+
+        private object InsertComponent(Dictionary<string, object> payload)
+        {
+            Document doc = _inventorApp.ActiveDocument;
+            if (!(doc is AssemblyDocument asmDoc))
+                throw new Exception("El documento activo debe ser un ensamble (.iam).");
+            AssemblyComponentDefinition compDef = asmDoc.ComponentDefinition;
+
+            if (!payload.ContainsKey("file_path"))
+                throw new Exception("file_path es requerido (ruta completa al archivo .ipt o .iam).");
+            string filePath = payload["file_path"].ToString().Replace('/', '\\');
+
+            Matrix matrix = _inventorApp.TransientGeometry.CreateMatrix();
+            ComponentOccurrence occurrence = compDef.Occurrences.Add(filePath, matrix);
+            int total = compDef.Occurrences.Count;
+
+            // Find index of the newly added occurrence
+            int occIdx = 1;
+            foreach (ComponentOccurrence o in compDef.Occurrences)
+            {
+                if (o.Name == occurrence.Name) break;
+                occIdx++;
+            }
+
+            return new
+            {
+                Status           = "ok",
+                OccurrenceName   = occurrence.Name,
+                OccurrenceIndex  = occIdx,
+                FilePath         = filePath,
+                Grounded         = occurrence.Grounded,
+                TotalOccurrences = total,
+                Note             = "Componente en el origen (0,0,0). Usa ground_component para fijarlo como base o add_assembly_constraint / add_assembly_joint para posicionarlo respecto a otro componente."
+            };
+        }
+
+        private object GroundComponent(Dictionary<string, object> payload)
+        {
+            Document doc = _inventorApp.ActiveDocument;
+            if (!(doc is AssemblyDocument asmDoc))
+                throw new Exception("El documento activo debe ser un ensamble (.iam).");
+            AssemblyComponentDefinition compDef = asmDoc.ComponentDefinition;
+
+            if (!payload.ContainsKey("occurrence"))
+                throw new Exception("occurrence es requerido (nombre o índice 1-based del componente).");
+            string occName = payload["occurrence"].ToString();
+            bool ground = !payload.ContainsKey("ground") || Convert.ToBoolean(payload["ground"]);
+
+            ComponentOccurrence occ = FindOccurrence(compDef, occName);
+            occ.Grounded = ground;
+
+            int total = compDef.Occurrences.Count;
+            int idx = 1;
+            foreach (ComponentOccurrence o in compDef.Occurrences)
+            {
+                if (o.Name == occ.Name) break;
+                idx++;
+            }
+
+            return new
+            {
+                Status           = "ok",
+                OccurrenceName   = occ.Name,
+                OccurrenceIndex  = idx,
+                Grounded         = occ.Grounded,
+                TotalOccurrences = total
+            };
+        }
+
+        private object AddAssemblyConstraint(Dictionary<string, object> payload)
+        {
+            Document doc = _inventorApp.ActiveDocument;
+            if (!(doc is AssemblyDocument asmDoc))
+                throw new Exception("El documento activo debe ser un ensamble (.iam).");
+            AssemblyComponentDefinition compDef = asmDoc.ComponentDefinition;
+
+            string constraintType = payload.ContainsKey("constraint_type")
+                ? payload["constraint_type"].ToString().ToLower().Trim() : "mate";
+
+            string occ1Name = payload.ContainsKey("occurrence1") ? payload["occurrence1"].ToString()
+                : throw new Exception("occurrence1 es requerido.");
+            int face1Idx = payload.ContainsKey("face1") ? Convert.ToInt32(payload["face1"]) : 1;
+            string occ2Name = payload.ContainsKey("occurrence2") ? payload["occurrence2"].ToString()
+                : throw new Exception("occurrence2 es requerido.");
+            int face2Idx = payload.ContainsKey("face2") ? Convert.ToInt32(payload["face2"]) : 1;
+
+            string units  = payload.ContainsKey("units") ? payload["units"].ToString().ToLower() : "mm";
+            double rawVal = payload.ContainsKey("value") ? Convert.ToDouble(payload["value"]) : 0.0;
+
+            ComponentOccurrence occ1 = FindOccurrence(compDef, occ1Name);
+            ComponentOccurrence occ2 = FindOccurrence(compDef, occ2Name);
+
+            // Face proxies — 1-based index on first solid body of each occurrence
+            object face1 = occ1.SurfaceBodies[1].Faces[face1Idx];
+            object face2 = occ2.SurfaceBodies[1].Faces[face2Idx];
+
+            double offsetCm  = ToInventorCm(rawVal, units);
+            double angleRad  = rawVal * Math.PI / 180.0;
+
+            string constraintName = "";
+            switch (constraintType)
+            {
+                case "mate":
+                    var mate = compDef.Constraints.AddMateConstraint(face1, face2, offsetCm);
+                    constraintName = mate.Name;
+                    break;
+                case "flush":
+                    var flush = compDef.Constraints.AddFlushConstraint(face1, face2, offsetCm);
+                    constraintName = flush.Name;
+                    break;
+                case "angle":
+                    var angle = compDef.Constraints.AddAngleConstraint(face1, face2, angleRad);
+                    constraintName = angle.Name;
+                    break;
+                case "tangent":
+                    bool inside = payload.ContainsKey("inside") && Convert.ToBoolean(payload["inside"]);
+                    var tangent = compDef.Constraints.AddTangentConstraint(face1, face2, inside, offsetCm);
+                    constraintName = tangent.Name;
+                    break;
+                case "insert":
+                    bool axesOpposed = !payload.ContainsKey("axes_opposed") || Convert.ToBoolean(payload["axes_opposed"]);
+                    var insert = compDef.Constraints.AddInsertConstraint(face1, face2, axesOpposed, offsetCm);
+                    constraintName = insert.Name;
+                    break;
+                default:
+                    throw new Exception($"Tipo de restricción '{constraintType}' no válido. Usa: mate, flush, angle, tangent, insert.");
+            }
+
+            return new
+            {
+                Status          = "ok",
+                ConstraintType  = constraintType,
+                ConstraintName  = constraintName,
+                EntityOne       = new { Occurrence = occ1.Name, FaceIndex = face1Idx },
+                EntityTwo       = new { Occurrence = occ2.Name, FaceIndex = face2Idx },
+                Value           = rawVal,
+                Units           = units,
+                TotalConstraints = compDef.Constraints.Count
+            };
+        }
+
+        private object AddAssemblyJoint(Dictionary<string, object> payload)
+        {
+            Document doc = _inventorApp.ActiveDocument;
+            if (!(doc is AssemblyDocument asmDoc))
+                throw new Exception("El documento activo debe ser un ensamble (.iam).");
+            AssemblyComponentDefinition compDef = asmDoc.ComponentDefinition;
+
+            string jointTypeName = payload.ContainsKey("joint_type")
+                ? payload["joint_type"].ToString().ToLower().Trim() : "rigid";
+            string occ1Name = payload.ContainsKey("occurrence1") ? payload["occurrence1"].ToString()
+                : throw new Exception("occurrence1 es requerido.");
+            int face1Idx = payload.ContainsKey("face1") ? Convert.ToInt32(payload["face1"]) : 1;
+            string occ2Name = payload.ContainsKey("occurrence2") ? payload["occurrence2"].ToString()
+                : throw new Exception("occurrence2 es requerido.");
+            int face2Idx = payload.ContainsKey("face2") ? Convert.ToInt32(payload["face2"]) : 1;
+
+            ComponentOccurrence occ1 = FindOccurrence(compDef, occ1Name);
+            ComponentOccurrence occ2 = FindOccurrence(compDef, occ2Name);
+
+            object face1 = occ1.SurfaceBodies[1].Faces[face1Idx];
+            object face2 = occ2.SurfaceBodies[1].Faces[face2Idx];
+
+            GeometryIntent intentOne = compDef.CreateGeometryIntent(face1, Type.Missing);
+            GeometryIntent intentTwo = compDef.CreateGeometryIntent(face2, Type.Missing);
+
+            AssemblyJointTypeEnum jointType;
+            switch (jointTypeName)
+            {
+                case "rigid":        jointType = AssemblyJointTypeEnum.kRigidJointType;       break;
+                case "rotational":   jointType = AssemblyJointTypeEnum.kRotationalJointType;  break;
+                case "sliding":      jointType = AssemblyJointTypeEnum.kSlideJointType;       break;
+                case "cylindrical":  jointType = AssemblyJointTypeEnum.kCylindricalJointType; break;
+                case "planar":       jointType = AssemblyJointTypeEnum.kPlanarJointType;      break;
+                case "ball":         jointType = AssemblyJointTypeEnum.kBallJointType;        break;
+                default: throw new Exception($"Tipo de joint '{jointTypeName}' no válido. Usa: rigid, rotational, sliding, cylindrical, planar, ball.");
+            }
+
+            AssemblyJointDefinition jointDef = compDef.Joints.CreateAssemblyJointDefinition(
+                jointType, intentOne, intentTwo);
+            AssemblyJoint joint = compDef.Joints.Add(jointDef);
+
+            return new
+            {
+                Status       = "ok",
+                JointType    = jointTypeName,
+                JointName    = joint.Name,
+                ComponentOne = new { Occurrence = occ1.Name, FaceIndex = face1Idx },
+                ComponentTwo = new { Occurrence = occ2.Name, FaceIndex = face2Idx },
+                TotalJoints  = compDef.Joints.Count
+            };
+        }
+
+        private object GetAssemblyBOM(Dictionary<string, object> payload)
+        {
+            Document doc = _inventorApp.ActiveDocument;
+            if (!(doc is AssemblyDocument asmDoc))
+                throw new Exception("El documento activo debe ser un ensamble (.iam).");
+            AssemblyComponentDefinition compDef = asmDoc.ComponentDefinition;
+
+            BOM bom = compDef.BOM;
+
+            // Prefer structured view, then parts-only, then first available
+            BOMView targetView = null;
+            foreach (BOMView v in bom.BOMViews)
+                if (v.ViewType == BOMViewTypeEnum.kStructuredBOMViewType) { targetView = v; break; }
+            if (targetView == null)
+                foreach (BOMView v in bom.BOMViews)
+                    if (v.ViewType == BOMViewTypeEnum.kPartsOnlyBOMViewType) { targetView = v; break; }
+            if (targetView == null && bom.BOMViews.Count > 0)
+                targetView = bom.BOMViews[1];
+            if (targetView == null)
+                throw new Exception("No se encontraron vistas de BOM en el ensamble.");
+
+            var items = new System.Collections.Generic.List<object>();
+            foreach (BOMRow row in targetView.BOMRows)
+            {
+                string partName = "";
+                string fileName = "";
+                try
+                {
+                    ComponentDefinition cd = row.ComponentDefinitions[1];
+                    Document cdDoc = (Document)cd.Document;
+                    partName = cdDoc.DisplayName;
+                    try { fileName = System.IO.Path.GetFileName(cdDoc.FullFileName); } catch { }
+                }
+                catch { }
+
+                items.Add(new
+                {
+                    ItemNumber = row.ItemNumber,
+                    Quantity   = row.ItemQuantity,
+                    PartName   = partName,
+                    FileName   = fileName
+                });
+            }
+
+            string viewTypeName = targetView.ViewType == BOMViewTypeEnum.kStructuredBOMViewType
+                ? "Structured" : "PartsOnly";
+
+            return new
+            {
+                Status       = "ok",
+                DocumentName = asmDoc.DisplayName,
+                ViewType     = viewTypeName,
+                TotalItems   = items.Count,
+                BOMItems     = items
             };
         }
     }
