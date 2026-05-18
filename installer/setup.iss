@@ -30,7 +30,20 @@ Source: "{#SourcePath}\Newtonsoft.Json.dll";     DestDir: "{app}"; Flags: ignore
 
 [Code]
 var
+  InventorDirPage: TInputDirWizardPage;
   ConfigPage: TInputQueryWizardPage;
+  DetectedInventorPath: string;
+
+function FindInventorPath(): string;
+var
+  DefaultPath: string;
+begin
+  DefaultPath := ExpandConstant('{pf}\Autodesk\Inventor 2024');
+  if FileExists(DefaultPath + '\Bin\Inventor.exe') then
+    Result := DefaultPath
+  else
+    Result := '';
+end;
 
 function EscapeJson(const S: string): string;
 var
@@ -50,7 +63,22 @@ end;
 
 procedure InitializeWizard;
 begin
-  ConfigPage := CreateInputQueryPage(wpWelcome,
+  DetectedInventorPath := FindInventorPath();
+
+  InventorDirPage := CreateInputDirPage(wpWelcome,
+    'Ubicación de Autodesk Inventor 2024',
+    'No se encontró Autodesk Inventor 2024 en la ruta predeterminada.',
+    'Selecciona la carpeta raíz de instalación de Autodesk Inventor 2024 ' +
+    '(debe contener la carpeta Bin con Inventor.exe y Autodesk.Inventor.Interop.dll):',
+    False, '');
+  InventorDirPage.Add('');
+
+  if DetectedInventorPath <> '' then
+    InventorDirPage.Values[0] := DetectedInventorPath
+  else
+    InventorDirPage.Values[0] := ExpandConstant('{pf}\Autodesk\Inventor 2024');
+
+  ConfigPage := CreateInputQueryPage(InventorDirPage.ID,
     'Configuración del servidor MCP',
     'Ingresa los datos de conexión al servidor MCP.',
     'Estos valores se guardan en config.json dentro de la carpeta del plugin y se pueden editar en cualquier momento.');
@@ -64,9 +92,48 @@ begin
   ConfigPage.Values[2] := '';
 end;
 
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if PageID = InventorDirPage.ID then
+    Result := DetectedInventorPath <> '';
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  SelectedPath: string;
 begin
   Result := True;
+
+  if CurPageID = InventorDirPage.ID then
+  begin
+    SelectedPath := InventorDirPage.Values[0];
+
+    if not FileExists(SelectedPath + '\Bin\Inventor.exe') then
+    begin
+      MsgBox(
+        'No se encontró Inventor.exe en:' + #13#10 +
+        SelectedPath + '\Bin\' + #13#10 + #13#10 +
+        'Verifica que seleccionaste la carpeta raíz correcta de Autodesk Inventor 2024.',
+        mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
+
+    if not FileExists(SelectedPath + '\Bin\Autodesk.Inventor.Interop.dll') then
+    begin
+      MsgBox(
+        'No se encontró Autodesk.Inventor.Interop.dll en:' + #13#10 +
+        SelectedPath + '\Bin\' + #13#10 + #13#10 +
+        'Verifica que tu instalación de Autodesk Inventor 2024 esté completa.',
+        mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
+
+    DetectedInventorPath := SelectedPath;
+  end;
+
   if CurPageID = ConfigPage.ID then
   begin
     if Trim(ConfigPage.Values[0]) = '' then
