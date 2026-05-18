@@ -300,10 +300,20 @@ namespace InventorMCPBridge.Services
             double x2 = Convert.ToDouble(payload["x2"]);
             double y2 = Convert.ToDouble(payload["y2"]);
 
-            PlanarSketch sketch = GetOrCreateSketchOnXY();
+            PlanarSketch sketch = GetActiveSketch();
             TransientGeometry tg = _inventorApp.TransientGeometry;
-            sketch.SketchLines.AddByTwoPoints(tg.CreatePoint2d(x1, y1), tg.CreatePoint2d(x2, y2));
-            return new { Status = "ok", Type = "line", X1 = x1, Y1 = y1, X2 = x2, Y2 = y2 };
+            SketchLine line = sketch.SketchLines.AddByTwoPoints(
+                tg.CreatePoint2d(x1, y1), tg.CreatePoint2d(x2, y2));
+            int index = TrackEntity((SketchEntity)(object)line);
+            return new
+            {
+                Status           = "ok",
+                Type             = "line",
+                EntityIndex      = index,
+                X1 = x1, Y1 = y1, X2 = x2, Y2 = y2,
+                SketchName       = sketch.Name,
+                TotalEntityCount = _sketchEntities.Count
+            };
         }
 
         private object CreateCircle(Dictionary<string, object> payload)
@@ -312,10 +322,22 @@ namespace InventorMCPBridge.Services
             double cy = Convert.ToDouble(payload["center_y"]);
             double r  = Convert.ToDouble(payload["radius"]);
 
-            PlanarSketch sketch = GetOrCreateSketchOnXY();
+            PlanarSketch sketch = GetActiveSketch();
             TransientGeometry tg = _inventorApp.TransientGeometry;
-            sketch.SketchCircles.AddByCenterRadius(tg.CreatePoint2d(cx, cy), r);
-            return new { Status = "ok", Type = "circle", CenterX = cx, CenterY = cy, Radius = r };
+            SketchCircle circle = sketch.SketchCircles.AddByCenterRadius(
+                tg.CreatePoint2d(cx, cy), r);
+            int index = TrackEntity((SketchEntity)(object)circle);
+            return new
+            {
+                Status           = "ok",
+                Type             = "circle",
+                EntityIndex      = index,
+                CenterX          = cx,
+                CenterY          = cy,
+                Radius           = r,
+                SketchName       = sketch.Name,
+                TotalEntityCount = _sketchEntities.Count
+            };
         }
 
         private object GetActiveDocInfo()
