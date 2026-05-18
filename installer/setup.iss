@@ -120,17 +120,6 @@ begin
       Exit;
     end;
 
-    if not FileExists(SelectedPath + '\Bin\Autodesk.Inventor.Interop.dll') then
-    begin
-      MsgBox(
-        'No se encontró Autodesk.Inventor.Interop.dll en:' + #13#10 +
-        SelectedPath + '\Bin\' + #13#10 + #13#10 +
-        'Verifica que tu instalación de Autodesk Inventor 2024 esté completa.',
-        mbError, MB_OK);
-      Result := False;
-      Exit;
-    end;
-
     DetectedInventorPath := SelectedPath;
   end;
 
