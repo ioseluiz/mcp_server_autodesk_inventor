@@ -1,223 +1,205 @@
-import asyncio
-import uuid
-import os
+"""Servidor MCP local para Autodesk Inventor.
+
+    Claude Desktop --stdio--> este proceso --named pipe--> add-in .NET 8 --COM--> Inventor
+
+El add-in es el servidor del pipe y este proceso su cliente: Claude Desktop relanza
+este proceso en cada arranque o reconexión y puede dejar más de uno vivo, mientras
+que Inventor permanece abierto. El extremo estable tiene que ser Inventor.
+
+IMPORTANTE: con transporte stdio, stdout está reservado al protocolo JSON-RPC.
+No usar print() en ningún sitio; los diagnósticos van a stderr.
+"""
+
+import io
 import json
-import base64
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
+import logging
+import os
+import sys
+import time
+from functools import partial
 from typing import Any, Dict, Optional
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
-from fastmcp import FastMCP
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from fastmcp.server.http import StreamableHTTPASGIApp
-from dotenv import load_dotenv
 
-load_dotenv()
+import anyio
+
+# Debe ir antes de importar fastmcp: sus settings se leen del entorno al importar.
+# Sin esto, cada arranque hace una petición a pypi.org para buscar actualizaciones.
+os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
+
+from fastmcp import FastMCP  # noqa: E402
 
 # =========================================================================
-# MAPA DE USUARIOS  api_key → user_id
+# CONFIGURACIÓN
+# No se lee ningún archivo: Claude Desktop lanza este proceso con un directorio de
+# trabajo arbitrario y un entorno mínimo, así que la configuración llega por
+# variables de entorno (bloque "env" de claude_desktop_config.json).
 # =========================================================================
-USERS: Dict[str, str] = {}
+PIPE_NAME = os.environ.get("INVENTOR_PIPE_NAME", "InventorMCPBridge")
+PIPE_PATH = rf"\\.\pipe\{PIPE_NAME}"
 
-_users_config = os.environ.get("USERS_CONFIG", "")
-if _users_config:
-    try:
-        USERS = json.loads(_users_config)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"USERS_CONFIG no es JSON válido: {e}")
-else:
-    _api_key = os.environ.get("API_KEY", "")
-    _user_id = os.environ.get("USER_ID", "default")
-    if not _api_key:
-        raise ValueError(
-            "Configura USERS_CONFIG (multi-usuario) o API_KEY + USER_ID (un usuario)."
-        )
-    USERS[_api_key] = _user_id
-
-if not USERS:
-    raise ValueError("USERS_CONFIG está vacío. Debe contener al menos un usuario.")
-
-current_user_id: ContextVar[str] = ContextVar("current_user_id")
-
-# =========================================================================
-# MCP — Streamable HTTP transport (MCP spec 2025-03-26).
-# Copilot Studio uses Streamable HTTP transport (MCP 2025-03-26):
-#   POST /sse  — send MCP request, receive SSE or JSON response
-#   GET  /sse  — open SSE stream for server-pushed events
-#   DELETE /sse — close session
-# All three methods are handled by StreamableHTTPASGIApp via a single
-# @app.api_route so FastAPI creates a Route (Match.FULL, no redirects).
-# =========================================================================
-mcp = FastMCP("Autodesk Inventor 2024 Assistant")
-
-_session_manager = StreamableHTTPSessionManager(
-    app=mcp._mcp_server,
-    event_store=None,
-    json_response=False,
-    stateless=False,
+logging.basicConfig(
+    stream=sys.stderr,
+    level=os.environ.get("INVENTOR_MCP_LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s",
 )
-_streamable_app = StreamableHTTPASGIApp(_session_manager)
+log = logging.getLogger("inventor-mcp")
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    async with mcp._lifespan_manager(), _session_manager.run():
-        yield
-
-
-# =========================================================================
-# FASTAPI APP
-# =========================================================================
-app = FastAPI(
-    title="Inventor MCP Azure Hub",
-    description="Puente entre Copilot Studio e Inventor local vía MCP",
-    lifespan=lifespan,
+BRIDGE_OFF_MESSAGE = (
+    f"El MCP Bridge no está activo en Inventor (pipe '{PIPE_NAME}'). "
+    "Abre Inventor y pulsa el botón 'MCP Bridge: OFF' en la pestaña MCP de la cinta."
 )
 
 # =========================================================================
-# MIDDLEWARE
+# CLIENTE DEL NAMED PIPE
+# Protocolo: JSON delimitado por líneas, una petición y una respuesta por línea.
+#   ->  {"id": "1", "command": "get_active_doc_info", "payload": {}}
+#   <-  {"id": "1", "result": {...}, "error": null}
 # =========================================================================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+ERROR_PIPE_BUSY = 231       # todas las instancias del pipe están ocupadas
+_CONNECT_ATTEMPTS = 3
 
 
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    if request.url.path in ["/", "/health"] or request.method == "OPTIONS":
-        return await call_next(request)
+class _PipeConnection:
+    """Un extremo del pipe. Se descarta completo en cuanto algo falla."""
 
-    # /messages/ is authenticated implicitly by the session_id query param.
-    if request.url.path.startswith("/messages"):
-        return await call_next(request)
+    def __init__(self, path: str) -> None:
+        self._raw = open(path, "r+b", buffering=0)
+        # Las respuestas pueden pesar varios MB (capturas de pantalla en base64), así
+        # que la lectura va con búfer: readline() sobre el FileIO crudo iría byte a byte.
+        self._reader = io.BufferedReader(self._raw, buffer_size=65536)
 
-    # Capture headers on /sse to diagnose Copilot Studio auth format
-    if request.url.path == "/sse":
-        _last_sse_request.clear()
-        _last_sse_request.update({
-            "method": request.method,
-            "headers": dict(request.headers),
-            "query_params": dict(request.query_params),
-        })
+    def roundtrip(self, request: bytes) -> bytes:
+        self._raw.write(request)
+        response = self._reader.readline()
+        if not response:
+            raise ConnectionError("El bridge cerró la conexión.")
+        return response
 
-    # Accept API key from multiple locations for Copilot Studio compatibility:
-    # 1. x-api-key header (C# plugin)
-    # 2. Authorization: Bearer <key>
-    # 3. Authorization: <key>
-    # 4. api-key query param
-    def extract_api_key() -> Optional[str]:
-        k = request.headers.get("x-api-key")
-        if k:
-            return k
-        auth = request.headers.get("authorization", "")
-        if auth.lower().startswith("bearer "):
-            return auth[7:]
-        if auth:
-            return auth
-        return request.query_params.get("api-key") or request.query_params.get("api_key")
-
-    api_key = extract_api_key()
-    user_id = USERS.get(api_key) if api_key else None
-    if not user_id:
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "API Key inválida o no asociada a ningún usuario."},
-        )
-
-    token = current_user_id.set(user_id)
-    try:
-        return await call_next(request)
-    finally:
-        current_user_id.reset(token)
+    def close(self) -> None:
+        for closeable in (self._reader, self._raw):
+            try:
+                closeable.close()
+            except OSError:
+                pass
 
 
-# =========================================================================
-# COLA DE TAREAS (polling inverso plugin ↔ servidor)
-# =========================================================================
-pending_tasks: Dict[str, Dict[str, Any]] = {}
-completed_tasks: Dict[str, Any] = {}
-task_events: Dict[str, asyncio.Event] = {}
-user_queues: Dict[str, Dict[str, Dict[str, Any]]] = {}
+class InventorBridge:
+    """Conexión única y reutilizada al add-in, serializada con un lock.
 
-# Captures the last request seen on /sse for auth diagnostics
-_last_sse_request: Dict[str, Any] = {}
+    No hace falta un pool: el add-in devuelve cada comando a la hebra principal de
+    Inventor, así que los comandos se ejecutan de uno en uno de todas formas.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._conn: Optional[_PipeConnection] = None
+        self._lock: Optional[anyio.Lock] = None
+        self._next_id = 0
+
+    def _get_lock(self) -> anyio.Lock:
+        # Se crea al vuelo, ya dentro del bucle de eventos.
+        if self._lock is None:
+            self._lock = anyio.Lock()
+        return self._lock
+
+    def _connect(self) -> _PipeConnection:
+        last_error: Optional[OSError] = None
+        for attempt in range(_CONNECT_ATTEMPTS):
+            try:
+                return _PipeConnection(self._path)
+            except FileNotFoundError:
+                # El pipe no existe: el bridge está apagado en Inventor.
+                raise RuntimeError(BRIDGE_OFF_MESSAGE) from None
+            except OSError as exc:
+                if getattr(exc, "winerror", None) != ERROR_PIPE_BUSY:
+                    raise
+                last_error = exc
+                time.sleep(0.2 * (attempt + 1))
+        raise RuntimeError(f"El bridge de Inventor está ocupado: {last_error}")
+
+    def _drop(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            conn.close()
+
+    def _exchange(self, request: bytes) -> bytes:
+        """Ida y vuelta bloqueante. Corre en un hilo, nunca en el bucle de eventos."""
+        for attempt in (0, 1):
+            conn = self._conn
+            if conn is None:
+                conn = self._conn = self._connect()
+            try:
+                return conn.roundtrip(request)
+            except OSError:
+                # Sesión muerta: el bridge se apagó, o el handle quedó obsoleto.
+                # Se reconecta una sola vez.
+                self._drop()
+                if attempt == 1:
+                    raise
+        raise AssertionError("inalcanzable")
+
+    async def call(
+        self, command: str, payload: Optional[Dict[str, Any]], timeout: float
+    ) -> Any:
+        self._next_id += 1
+        request = json.dumps(
+            {"id": str(self._next_id), "command": command, "payload": payload or {}},
+            ensure_ascii=False,
+        ).encode("utf-8") + b"\n"
+
+        log.debug("-> %s(%s)", command, ", ".join(payload or ()))
+
+        async with self._get_lock():
+            try:
+                with anyio.fail_after(timeout):
+                    raw = await anyio.to_thread.run_sync(
+                        partial(self._exchange, request), abandon_on_cancel=True
+                    )
+            except TimeoutError:
+                # El hilo abandonado sigue bloqueado en readline: al cerrar el handle
+                # su lectura falla y termina, y la siguiente petición reconecta.
+                self._drop()
+                raise RuntimeError(
+                    f"Timeout: Inventor no respondió en {timeout:g}s al comando '{command}'."
+                ) from None
+
+        try:
+            message = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Respuesta ilegible del bridge: {exc}") from None
+
+        error = message.get("error")
+        if error:
+            raise RuntimeError(error)
+        return message.get("result")
 
 
-class TaskResult(BaseModel):
-    task_id: str
-    result: Any
-    error: Optional[str] = None
+bridge = InventorBridge(PIPE_PATH)
+
+# Las 52 tools hacen `usuario = current_user_id.get(None)` y lo pasan como primer
+# argumento a execute_in_inventor. Un ContextVar no sirve aquí: `get(None)` devuelve el
+# None que se le pasa e ignora el default del propio ContextVar, así que las tools
+# responderían "Error: sesión no autenticada". Este sustituto resuelve siempre al único
+# usuario local y evita reescribir los 52 cuerpos.
+class _LocalUser:
+    @staticmethod
+    def get(default: Optional[str] = None) -> str:
+        return "local"
 
 
-# =========================================================================
-# ENDPOINTS PARA EL PLUGIN C#
-# =========================================================================
-@app.get("/api/poll/{user_id}")
-async def poll_tasks(user_id: str):
-    caller = current_user_id.get(None)
-    if caller != user_id:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Tu API key no está autorizada para el usuario '{user_id}'.",
-        )
+current_user_id = _LocalUser()
 
-    if user_id not in user_queues or not user_queues[user_id]:
-        return {"task_id": None}
-
-    task_id = next(iter(user_queues[user_id]))
-    task_data = user_queues[user_id].pop(task_id)
-    return {
-        "task_id": task_id,
-        "command": task_data["command"],
-        "payload": task_data["payload"],
-    }
-
-
-@app.post("/api/result/{task_id}")
-async def submit_result(task_id: str, result: TaskResult):
-    if task_id in task_events:
-        completed_tasks[task_id] = result.model_dump()
-        task_events[task_id].set()
-        return {"status": "ok"}
-    return {"status": "error", "message": "Task ID no encontrado o expirado"}
+mcp = FastMCP("Autodesk Inventor 2026 Assistant")
 
 
 async def execute_in_inventor(
     usuario: str, command: str, payload: Dict[str, Any], timeout_seconds: float = 60.0
 ) -> Any:
-    task_id = str(uuid.uuid4())
-    event = asyncio.Event()
-    task_events[task_id] = event
+    """Ejecuta un comando en Inventor a través del add-in.
 
-    if usuario not in user_queues:
-        user_queues[usuario] = {}
-
-    user_queues[usuario][task_id] = {"command": command, "payload": payload}
-    pending_tasks[task_id] = {"command": command, "payload": payload}
-
-    try:
-        await asyncio.wait_for(event.wait(), timeout=timeout_seconds)
-        res = completed_tasks.pop(task_id, None)
-        if res and res.get("error"):
-            raise Exception(res["error"])
-        return res.get("result") if res else None
-    except asyncio.TimeoutError:
-        pending_tasks.pop(task_id, None)
-        if usuario in user_queues and task_id in user_queues[usuario]:
-            user_queues[usuario].pop(task_id)
-        raise Exception(
-            f"Timeout: Inventor no respondió en {timeout_seconds}s al comando '{command}'."
-        )
-    finally:
-        task_events.pop(task_id, None)
-
+    `usuario` se ignora: venía del modo multiusuario del servidor en la nube y se
+    mantiene en la firma para no tocar las 52 tools.
+    """
+    return await bridge.call(command, payload, timeout_seconds)
 
 # =========================================================================
 # TOOLS MCP
@@ -1781,43 +1763,53 @@ async def mirror_solid(
 
 
 # =========================================================================
-# ENDPOINTS DE INFRAESTRUCTURA + SSE
-# All explicit routes must be registered BEFORE app.mount() calls so that
-# Starlette's ordered route resolution finds them first.
+# ARRANQUE
+# Claude Desktop lanza este proceso y habla JSON-RPC por stdin/stdout. No hay
+# servidor HTTP, ni puertos, ni API keys: el único canal de salida es el named pipe
+# hacia el add-in de Inventor.
 # =========================================================================
-@app.get("/")
-async def root():
-    return {"status": "online", "service": "Inventor MCP Azure Hub"}
+def _run_cli(argv: list) -> Optional[int]:
+    """Modos auxiliares que usa el instalador.
 
+    Devuelve el código de salida, o None si hay que arrancar el servidor MCP. Aquí sí
+    se puede escribir en stdout: no se está hablando JSON-RPC.
+    """
+    flags = {"--install-claude-config", "--remove-claude-config", "--print-claude-config"}
+    requested = flags.intersection(argv)
+    if not requested:
+        return None
 
-@app.get("/health")
-async def health_public():
-    """Sonda de salud pública para Azure App Service (sin autenticación)."""
-    return {"status": "ok"}
+    import claude_config
 
+    try:
+        if "--print-claude-config" in requested:
+            print(claude_config.snippet())
+        elif "--install-claude-config" in requested:
+            path, action = claude_config.install()
+            print(f"Entrada '{claude_config.SERVER_KEY}' {action} en {path}")
+            print("Reinicia Claude Desktop para que cargue el servidor.")
+        else:
+            path, action = claude_config.remove()
+            print(f"Entrada '{claude_config.SERVER_KEY}' {action} en {path}")
+    except (RuntimeError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
-@app.get("/api/health")
-async def health():
-    """Health check para el plugin de Inventor (requiere API key)."""
-    caller = current_user_id.get(None)
-    return {"status": "ok", "user_id": caller, "message": "Servidor MCP activo"}
-
-
-@app.get("/api/debug")
-async def debug_last_sse():
-    """Devuelve los headers de la última request recibida en /sse."""
-    return _last_sse_request or {"info": "Ninguna request a /sse capturada aún."}
-
-
-@app.api_route("/sse", methods=["GET", "POST", "DELETE"])
-async def mcp_endpoint(request: Request):
-    """MCP Streamable HTTP endpoint — Copilot Studio uses POST to call tools."""
-    await _streamable_app(request.scope, request.receive, request._send)
-    return Response()
+    return 0
 
 
 if __name__ == "__main__":
-    import uvicorn
+    _code = _run_cli(sys.argv[1:])
+    if _code is not None:
+        sys.exit(_code)
 
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    log.info("Servidor MCP de Inventor iniciado (pipe %s)", PIPE_PATH)
+    # show_banner=False: el banner de FastMCP sale por stderr y solo ensucia el log
+    # que muestra Claude Desktop.
+    #
+    # Nota: al cerrarse, el ejecutable de PyInstaller imprime en stderr un
+    # "ValueError: I/O operation on closed file" que viene de la finalización de
+    # FastMCP/docket, no de este código (no ocurre ejecutando main.py sin congelar, y
+    # no se puede capturar desde aquí porque se lanza tras salir de mcp.run). Es ruido
+    # de apagado, posterior al cierre de la sesión MCP, y no afecta a nada.
+    mcp.run(transport="stdio", show_banner=False)

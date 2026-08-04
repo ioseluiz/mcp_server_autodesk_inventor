@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net48</TargetFramework>
+    <!-- Inventor 2025+ hosts .NET 8; a net48 assembly no longer loads. Requires Inventor 2026. -->
+    <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
@@ -10,19 +11,18 @@
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <!-- Keep the output in bin\x64\<Config>\ instead of the net8.0-windows subfolder,
+         which is where Inventor and the installer expect the add-in files. -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Reference Include="System.Net.Http" />
-  </ItemGroup>
+  <!-- No NuGet dependencies on purpose: Inventor 2025/2026 loads add-ins into the default
+       AssemblyLoadContext, so any package we ship can clash with Inventor's own copy.
+       JSON is handled by System.Text.Json (see Services/JsonPayload.cs). -->
 
   <!-- Resolve Inventor Interop: use local installation if present, else fall back to lib/ (for CI) -->
   <PropertyGroup>
-    <_InventorInteropSystem>C:\Program Files\Autodesk\Inventor 2024\Bin\Public Assemblies\Autodesk.Inventor.Interop.dll</_InventorInteropSystem>
+    <_InventorInteropSystem>C:\Program Files\Autodesk\Inventor 2026\Bin\Public Assemblies\Autodesk.Inventor.Interop.dll</_InventorInteropSystem>
     <InventorInteropPath Condition="Exists('$(_InventorInteropSystem)')">$(_InventorInteropSystem)</InventorInteropPath>
     <InventorInteropPath Condition="'$(InventorInteropPath)' == ''">$(MSBuildProjectDirectory)\..\lib\Autodesk.Inventor.Interop.dll</InventorInteropPath>
   </PropertyGroup>

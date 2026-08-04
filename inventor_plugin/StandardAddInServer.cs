@@ -20,7 +20,8 @@ namespace InventorMCPBridge
         private ButtonDefinition _btnOff;
         private readonly List<CommandControl> _onControls  = new List<CommandControl>();
         private readonly List<CommandControl> _offControls = new List<CommandControl>();
-        private PollingService _pollingService;
+        private BridgeService _bridge;
+        private Control _uiMarshal;
         private bool _isBridgeActive = false;
 
         public void Activate(ApplicationAddInSite addInSiteObject, bool firstTime)
@@ -29,12 +30,15 @@ namespace InventorMCPBridge
             {
                 _inventorApp = addInSiteObject.Application;
 
+                // Activate() corre en la hebra principal (STA) de Inventor. Este control
+                // oculto crea un HWND en ella; tocar .Handle fuerza su creación aunque el
+                // control no tenga padre. Sirve para devolver las peticiones que llegan
+                // por el pipe a esta hebra, que es la única que puede llamar a la API COM.
+                _uiMarshal = new Control();
+                var _ = _uiMarshal.Handle;
+
                 var cfg = PluginConfig.Load();
-                _pollingService = new PollingService(
-                    _inventorApp,
-                    cfg.ServerUrl,
-                    cfg.ApiKey,
-                    cfg.UserId);
+                _bridge = new BridgeService(_inventorApp, cfg.PipeName, RunOnInventorThread);
 
                 ControlDefinitions controlDefs = _inventorApp.CommandManager.ControlDefinitions;
                 string clientId = "{E1A5A5A5-A5A5-A5A5-A5A5-A5A5A5A5A5A5}";
@@ -110,19 +114,38 @@ namespace InventorMCPBridge
             }
         }
 
+        // Ejecuta el trabajo en la hebra principal de Inventor. Las excepciones se
+        // propagan al llamante, que las convierte en el campo "error" de la respuesta.
+        private object RunOnInventorThread(Func<object> work)
+        {
+            if (_uiMarshal == null || !_uiMarshal.InvokeRequired)
+                return work();
+
+            return _uiMarshal.Invoke(work);
+        }
+
         private void ToggleBridge()
         {
-            if (!_isBridgeActive)
+            // El plugin es el servidor: no hay nada que probar antes de arrancar, solo
+            // abrir el pipe. Un fallo aquí (nombre inválido, permisos) sí es visible.
+            try
             {
-                if (!_pollingService.TestConnection())
-                {
-                    MessageBox.Show(
-                        "No se pudo conectar al servidor MCP.\n\nVerifica que el servidor esté corriendo y que la URL y API Key sean correctas.",
-                        "MCP Bridge — Sin conexión",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
-                    return;
-                }
+                if (!_isBridgeActive)
+                    _bridge.Start();
+                else
+                    _bridge.Stop();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    "No se pudo abrir el bridge en el pipe '" + _bridge.PipeName + "'.\n\n" +
+                    ex.Message +
+                    "\n\nSi tienes otra sesión de Inventor con el bridge activo, asigna un " +
+                    "PipeName distinto en config.json.",
+                    "MCP Bridge",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
             }
 
             _isBridgeActive = !_isBridgeActive;
@@ -131,11 +154,6 @@ namespace InventorMCPBridge
                 c.Visible = !_isBridgeActive;
             foreach (CommandControl c in _onControls)
                 c.Visible = _isBridgeActive;
-
-            if (_isBridgeActive)
-                _pollingService.Start();
-            else
-                _pollingService.Stop();
         }
 
         private RibbonTab GetOrCreateTab(Ribbon ribbon, string displayName, string internalName)
@@ -214,11 +232,13 @@ namespace InventorMCPBridge
         {
             try
             {
-                _pollingService?.Stop();
+                _bridge?.Stop();
+                _uiMarshal?.Dispose();
                 Marshal.ReleaseComObject(_inventorApp);
             }
             finally
             {
+                _uiMarshal = null;
                 _inventorApp = null;
                 GC.Collect();
                 GC.WaitForPendingFinalizers();

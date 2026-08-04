@@ -1,13 +1,23 @@
 using System.IO;
-using Newtonsoft.Json;
+using System.Text.Json;
 
 namespace InventorMCPBridge.Config
 {
     internal class PluginConfig
     {
-        public string ServerUrl { get; set; } = "https://your-app.azurewebsites.net";
-        public string ApiKey   { get; set; } = "1234567890";
-        public string UserId   { get; set; } = "user";
+        // Nombre del named pipe donde escucha el bridge. Solo hay que cambiarlo si se
+        // ejecutan varias sesiones de Inventor a la vez: el servidor MCP se conectaría
+        // a cualquiera de ellas indistintamente.
+        public string PipeName { get; set; } = "InventorMCPBridge";
+
+        private static readonly JsonSerializerOptions Options = new JsonSerializerOptions
+        {
+            // Newtonsoft era insensible a mayúsculas: los config.json existentes
+            // (pipeName, PipeName) deben seguir cargando igual.
+            PropertyNameCaseInsensitive = true,
+            ReadCommentHandling         = JsonCommentHandling.Skip,
+            AllowTrailingCommas         = true,
+        };
 
         internal static PluginConfig Load()
         {
@@ -21,7 +31,7 @@ namespace InventorMCPBridge.Config
             try
             {
                 string json = File.ReadAllText(configPath);
-                return JsonConvert.DeserializeObject<PluginConfig>(json) ?? new PluginConfig();
+                return JsonSerializer.Deserialize<PluginConfig>(json, Options) ?? new PluginConfig();
             }
             catch
             {
