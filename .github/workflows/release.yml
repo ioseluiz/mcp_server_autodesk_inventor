@@ -6,7 +6,12 @@ on:
       - 'v*'
 
 jobs:
+  # No se publica un instalador sin que pase la batería de pruebas.
+  tests:
+    uses: ./.github/workflows/tests.yml
+
   build-and-release:
+    needs: tests
     runs-on: windows-latest
     permissions:
       contents: write
@@ -19,39 +24,60 @@ jobs:
         id: version
         shell: pwsh
         run: |
+          # VERSION admite sufijos de prerelease (1.2.0-beta1); NUMERIC no, porque
+          # AssemblyVersion y FileVersion solo aceptan números.
           $version = "${{ github.ref_name }}".TrimStart('v')
+          $numeric = ($version -split '-')[0]
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "NUMERIC=$numeric" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-      - name: Restore NuGet packages
-        run: dotnet restore inventor_plugin/InventorMCPBridge.sln
-
+      # Sin Inventor instalado, el .csproj cae al interop de lib/. Ese DLL debe ser el de
+      # Inventor 2026 (versión 30.x): con el de 2024 el build pasa igualmente, porque un
+      # interop COM solo aporta definiciones de tipos, pero no valida la API real.
+      #
+      # Se usa `dotnet build` y no `publish` a propósito: el add-in no tiene dependencias
+      # NuGet, así que publish no añadiría nada y sí movería la salida a un subdirectorio
+      # distinto del que espera setup.iss.
       - name: Build plugin (Release x64)
         run: >
-          msbuild inventor_plugin/InventorMCPBridge.sln
-          /p:Configuration=Release
-          /p:Platform=x64
-          /p:AssemblyVersion=${{ steps.version.outputs.VERSION }}
-          /p:FileVersion=${{ steps.version.outputs.VERSION }}
+          dotnet build inventor_plugin/InventorMCPBridge.csproj
+          -c Release
+          -p:Platform=x64
+          -p:AssemblyVersion=${{ steps.version.outputs.NUMERIC }}
+          -p:FileVersion=${{ steps.version.outputs.NUMERIC }}
 
-      - name: Locate Inno Setup
-        id: inno
-        shell: pwsh
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Produce mcp_server/dist/inventor-mcp.exe, que es de donde lo toma setup.iss.
+      - name: Build MCP server executable
+        working-directory: mcp_server
         run: |
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            choco install innosetup --no-progress -y
-          }
-          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-build.txt
+          pyinstaller --noconfirm inventor-mcp.spec
+
+      # setup.iss usa los identificadores "x64compatible", que exigen Inno Setup >= 6.3.
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
 
       - name: Compile installer
         shell: pwsh
         run: |
-          & "${{ steps.inno.outputs.ISCC }}" `
-            /DAppVersion="${{ steps.version.outputs.VERSION }}" `
-            installer\setup.iss
+          $iscc = Get-ChildItem `
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe", `
+            "C:\Program Files\Inno Setup 6\ISCC.exe" `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) { throw "No se encontró ISCC.exe tras instalar Inno Setup." }
+          & $iscc.FullName /DAppVersion="${{ steps.version.outputs.VERSION }}" installer\setup.iss
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

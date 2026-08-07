@@ -1,103 +1,204 @@
 using System;
 using System.Collections.Generic;
-using System.Net.Http;
+// Nota: no se importa System.IO — 'Path' chocaría con Inventor.Path (trayectoria de
+// barrido, usada en SweepProfile). Los tipos de System.IO van cualificados.
+using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Inventor;
-using Newtonsoft.Json;
 
 namespace InventorMCPBridge.Services
 {
-    public class PollingService
+    // Servidor del bridge. El plugin es el extremo estable: escucha en un named pipe
+    // y el servidor MCP local (proceso Python que lanza Claude Desktop por stdio) se
+    // conecta como cliente. Los roles están así porque Claude Desktop relanza su
+    // proceso servidor en cada arranque o reconexión y puede dejar más de uno vivo,
+    // mientras que Inventor permanece abierto.
+    //
+    // Protocolo: JSON delimitado por líneas, una petición y una respuesta por línea.
+    //   →  {"id": "1", "command": "get_active_doc_info", "payload": {}}
+    //   ←  {"id": "1", "result": {...}, "error": null}
+    public class BridgeService
     {
+        public const string DefaultPipeName = "InventorMCPBridge";
+
         private readonly Application _inventorApp;
-        private readonly string _baseUrl;
-        private readonly string _apiKey;
-        private readonly string _userId;
-        private readonly HttpClient _client;
+        private readonly string _pipeName;
+        private readonly Func<Func<object>, object> _dispatcher;
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
         private CancellationTokenSource _cts;
-        private bool _isRunning;
+        private volatile bool _isRunning;
         private PlanarSketch _activeSketch;
         private List<SketchEntity> _sketchEntities = new List<SketchEntity>();
 
-        public PollingService(Application inventorApp, string baseUrl, string apiKey, string userId)
+        // dispatcher ejecuta el trabajo en la hebra principal (STA) de Inventor.
+        public BridgeService(Application inventorApp, string pipeName, Func<Func<object>, object> dispatcher)
         {
             _inventorApp = inventorApp;
-            _baseUrl = baseUrl.TrimEnd('/');
-            _apiKey = apiKey;
-            _userId = userId;
-            _client = new HttpClient();
-            _client.DefaultRequestHeaders.Add("x-api-key", _apiKey);
+            _pipeName = string.IsNullOrWhiteSpace(pipeName) ? DefaultPipeName : pipeName.Trim();
+            _dispatcher = dispatcher;
         }
 
-        public bool TestConnection()
-        {
-            try
-            {
-                var response = _client.GetAsync($"{_baseUrl}/api/health")
-                                      .GetAwaiter().GetResult();
-                return response.IsSuccessStatusCode;
-            }
-            catch
-            {
-                return false;
-            }
-        }
+        public bool IsRunning => _isRunning;
 
+        public string PipeName => _pipeName;
+
+        // Crea la primera instancia del pipe de forma sincrónica para que un fallo
+        // (nombre inválido, permisos) llegue al llamante y se pueda mostrar al usuario.
         public void Start()
         {
             if (_isRunning) return;
-            _isRunning = true;
+
+            NamedPipeServerStream first = CreateServerStream();
             _cts = new CancellationTokenSource();
-            Task.Run(() => PollLoop(_cts.Token));
+            _isRunning = true;
+            Task.Run(() => AcceptLoop(first, _cts.Token));
         }
 
         public void Stop()
         {
+            if (!_isRunning) return;
             _isRunning = false;
-            _cts?.Cancel();
+            // Cancela el WaitForConnectionAsync pendiente y cierra las sesiones vivas.
+            try { _cts?.Cancel(); } catch { }
         }
 
-        private async Task PollLoop(CancellationToken token)
+        private NamedPipeServerStream CreateServerStream()
         {
-            while (!token.IsCancellationRequested)
-            {
-                try
-                {
-                    var response = await _client.GetAsync($"{_baseUrl}/api/poll/{_userId}", token);
-                    if (response.IsSuccessStatusCode)
-                    {
-                        string content = await response.Content.ReadAsStringAsync();
-                        if (!string.IsNullOrEmpty(content))
-                        {
-                            var task = JsonConvert.DeserializeObject<McpTask>(content);
-                            if (task != null && !string.IsNullOrEmpty(task.TaskId))
-                                await HandleTask(task);
-                        }
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception)
-                {
-                    // Silencioso — el servidor puede no estar disponible
-                }
+            return new NamedPipeServerStream(
+                _pipeName,
+                PipeDirection.InOut,
+                NamedPipeServerStream.MaxAllowedServerInstances,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous);
+        }
 
-                await Task.Delay(2000, token);
+        // Acepta conexiones indefinidamente: una instancia del pipe queda siempre a la
+        // espera mientras las sesiones ya conectadas se atienden en paralelo.
+        private async Task AcceptLoop(NamedPipeServerStream firstServer, CancellationToken token)
+        {
+            NamedPipeServerStream server = firstServer;
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    if (server == null) server = CreateServerStream();
+
+                    try
+                    {
+                        await server.WaitForConnectionAsync(token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (System.IO.IOException)
+                    {
+                        // El cliente se cayó antes de completar la conexión.
+                        server.Dispose();
+                        server = null;
+                        continue;
+                    }
+
+                    NamedPipeServerStream session = server;
+                    server = null;   // la sesión pasa a ser responsable del stream
+                    _ = Task.Run(() => ServeAsync(session, token));
+                }
+            }
+            catch (Exception)
+            {
+                // Un fallo del bucle de accept no debe tumbar el add-in.
+            }
+            finally
+            {
+                if (server != null) server.Dispose();
+                _isRunning = false;
             }
         }
 
-        private async Task HandleTask(McpTask task)
+        private async Task ServeAsync(NamedPipeServerStream pipe, CancellationToken token)
         {
-            object result = null;
-            string error = null;
-
             try
             {
-                switch (task.Command)
+                using (pipe)
+                using (var reader = new System.IO.StreamReader(pipe, Utf8NoBom, false, 4096, true))
+                using (var writer = new System.IO.StreamWriter(pipe, Utf8NoBom, 4096, true))
+                {
+                    // El cliente es Python: terminador de línea sin \r.
+                    writer.NewLine = "\n";
+                    writer.AutoFlush = true;
+
+                    while (!token.IsCancellationRequested && pipe.IsConnected)
+                    {
+                        string line = await reader.ReadLineAsync(token).ConfigureAwait(false);
+                        if (line == null) break;               // cliente desconectado
+                        if (line.Length == 0) continue;
+
+                        string response = ProcessLine(line);
+                        await writer.WriteLineAsync(response.AsMemory(), token).ConfigureAwait(false);
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (System.IO.IOException) { }   // pipe roto: normal cuando el cliente muere
+            catch (Exception) { }
+        }
+
+        private string ProcessLine(string line)
+        {
+            string id = null;
+            try
+            {
+                McpRequest request = JsonPayload.ParseRequest(line);
+                id = request.Id;
+
+                if (string.IsNullOrEmpty(request.Command))
+                    return JsonPayload.SerializeResponse(id, null, "Petición sin 'command'.");
+
+                object result = null;
+                string error = null;
+                try
+                {
+                    // Los handlers usan la API COM de Inventor, que es STA: hay que
+                    // ejecutarlos en su hebra principal, no en la hebra del pipe.
+                    result = _dispatcher(() => Execute(request.Command, request.Payload));
+                }
+                catch (Exception ex)
+                {
+                    error = Describe(ex);
+                }
+
+                return JsonPayload.SerializeResponse(id, result, error);
+            }
+            catch (Exception ex)
+            {
+                // JSON de entrada inválido, o el resultado no se pudo serializar.
+                try { return JsonPayload.SerializeResponse(id, null, Describe(ex)); }
+                catch { return "{\"id\":null,\"result\":null,\"error\":\"Error interno del bridge.\"}"; }
+            }
+        }
+
+        // Desenvuelve la excepción y añade el HRESULT cuando viene de COM, que es lo
+        // único que permite distinguir los fallos reales de Inventor.
+        private static string Describe(Exception ex)
+        {
+            Exception inner = ex;
+            while (inner.InnerException != null) inner = inner.InnerException;
+
+            var com = inner as COMException;
+            return com != null
+                ? $"{com.Message} (HRESULT 0x{com.HResult:X8})"
+                : inner.Message;
+        }
+
+        private object Execute(string command, Dictionary<string, object> payload)
+        {
+            object result = null;
+
+            {
+                switch (command)
                 {
                     case "get_active_doc_info":
                         result = GetActiveDocInfo();
@@ -106,173 +207,161 @@ namespace InventorMCPBridge.Services
                         result = ListParameters();
                         break;
                     case "update_parameter":
-                        result = UpdateParameter(task.Payload);
+                        result = UpdateParameter(payload);
                         break;
                     case "export_step":
-                        result = ExportStep(task.Payload);
+                        result = ExportStep(payload);
                         break;
                     case "render_screenshot":
-                        result = RenderScreenshot(task.Payload);
+                        result = RenderScreenshot(payload);
                         break;
                     case "export_to_stl":
-                        result = ExportToStl(task.Payload);
+                        result = ExportToStl(payload);
                         break;
                     case "export_to_dxf":
-                        result = ExportToDxf(task.Payload);
+                        result = ExportToDxf(payload);
                         break;
                     case "check_interference":
-                        result = CheckInterference(task.Payload);
+                        result = CheckInterference(payload);
                         break;
                     case "get_mass_properties":
-                        result = GetMassProperties(task.Payload);
+                        result = GetMassProperties(payload);
                         break;
                     case "create_line":
-                        result = CreateLine(task.Payload);
+                        result = CreateLine(payload);
                         break;
                     case "create_circle":
-                        result = CreateCircle(task.Payload);
+                        result = CreateCircle(payload);
                         break;
                     case "create_new_part":
-                        result = CreateNewPart(task.Payload);
+                        result = CreateNewPart(payload);
                         break;
                     case "create_new_assembly":
-                        result = CreateNewAssembly(task.Payload);
+                        result = CreateNewAssembly(payload);
                         break;
                     case "open_document":
-                        result = OpenDocument(task.Payload);
+                        result = OpenDocument(payload);
                         break;
                     case "save_document":
-                        result = SaveDocument(task.Payload);
+                        result = SaveDocument(payload);
                         break;
                     case "change_units":
-                        result = ChangeUnits(task.Payload);
+                        result = ChangeUnits(payload);
                         break;
                     case "set_material":
-                        result = SetMaterial(task.Payload);
+                        result = SetMaterial(payload);
                         break;
                     case "create_sketch":
-                        result = CreateSketch(task.Payload);
+                        result = CreateSketch(payload);
                         break;
                     case "draw_rectangle":
-                        result = DrawRectangle(task.Payload);
+                        result = DrawRectangle(payload);
                         break;
                     case "draw_arc":
-                        result = DrawArc(task.Payload);
+                        result = DrawArc(payload);
                         break;
                     case "draw_slot":
-                        result = DrawSlot(task.Payload);
+                        result = DrawSlot(payload);
                         break;
                     case "add_sketch_dimension":
-                        result = AddSketchDimension(task.Payload);
+                        result = AddSketchDimension(payload);
                         break;
                     case "add_sketch_constraint":
-                        result = AddSketchConstraint(task.Payload);
+                        result = AddSketchConstraint(payload);
                         break;
                     case "project_geometry":
-                        result = ProjectGeometry(task.Payload);
+                        result = ProjectGeometry(payload);
                         break;
                     case "close_sketch":
-                        result = CloseSketch(task.Payload);
+                        result = CloseSketch(payload);
                         break;
                     case "extrude_profile":
-                        result = ExtrudeProfile(task.Payload);
+                        result = ExtrudeProfile(payload);
                         break;
                     case "revolve_profile":
-                        result = RevolveProfile(task.Payload);
+                        result = RevolveProfile(payload);
                         break;
                     case "sweep_profile":
-                        result = SweepProfile(task.Payload);
+                        result = SweepProfile(payload);
                         break;
                     case "loft_profiles":
-                        result = LoftProfiles(task.Payload);
+                        result = LoftProfiles(payload);
                         break;
                     case "create_hole":
-                        result = CreateHole(task.Payload);
+                        result = CreateHole(payload);
                         break;
                     case "add_fillet":
-                        result = AddFillet(task.Payload);
+                        result = AddFillet(payload);
                         break;
                     case "add_chamfer":
-                        result = AddChamfer(task.Payload);
+                        result = AddChamfer(payload);
                         break;
                     case "shell_solid":
-                        result = ShellSolid(task.Payload);
+                        result = ShellSolid(payload);
                         break;
                     case "thread_feature":
-                        result = AddThreadFeature(task.Payload);
+                        result = AddThreadFeature(payload);
                         break;
                     case "split_body":
-                        result = SplitBody(task.Payload);
+                        result = SplitBody(payload);
                         break;
                     case "combine_bodies":
-                        result = CombineBodies(task.Payload);
+                        result = CombineBodies(payload);
                         break;
                     case "create_rectangular_pattern":
-                        result = CreateRectangularPattern(task.Payload);
+                        result = CreateRectangularPattern(payload);
                         break;
                     case "create_circular_pattern":
-                        result = CreateCircularPattern(task.Payload);
+                        result = CreateCircularPattern(payload);
                         break;
                     case "mirror_feature":
-                        result = MirrorFeature(task.Payload);
+                        result = MirrorFeature(payload);
                         break;
                     case "mirror_solid":
-                        result = MirrorSolid(task.Payload);
+                        result = MirrorSolid(payload);
                         break;
                     case "get_parameters":
                         result = GetParametersRich();
                         break;
                     case "set_parameter_value":
-                        result = SetParameterValue(task.Payload);
+                        result = SetParameterValue(payload);
                         break;
                     case "add_custom_parameter":
-                        result = AddCustomParameter(task.Payload);
+                        result = AddCustomParameter(payload);
                         break;
                     case "update_iproperties":
-                        result = UpdateIProperties(task.Payload);
+                        result = UpdateIProperties(payload);
                         break;
                     case "create_work_plane":
-                        result = CreateWorkPlane(task.Payload);
+                        result = CreateWorkPlane(payload);
                         break;
                     case "create_work_axis":
-                        result = CreateWorkAxis(task.Payload);
+                        result = CreateWorkAxis(payload);
                         break;
                     case "create_work_point":
-                        result = CreateWorkPoint(task.Payload);
+                        result = CreateWorkPoint(payload);
                         break;
                     case "insert_component":
-                        result = InsertComponent(task.Payload);
+                        result = InsertComponent(payload);
                         break;
                     case "ground_component":
-                        result = GroundComponent(task.Payload);
+                        result = GroundComponent(payload);
                         break;
                     case "add_assembly_constraint":
-                        result = AddAssemblyConstraint(task.Payload);
+                        result = AddAssemblyConstraint(payload);
                         break;
                     case "add_assembly_joint":
-                        result = AddAssemblyJoint(task.Payload);
+                        result = AddAssemblyJoint(payload);
                         break;
                     case "get_assembly_bom":
-                        result = GetAssemblyBOM(task.Payload);
+                        result = GetAssemblyBOM(payload);
                         break;
                     default:
-                        error = $"Comando no reconocido: {task.Command}";
-                        break;
+                        throw new Exception($"Comando no reconocido: {command}");
                 }
             }
-            catch (Exception ex)
-            {
-                error = ex.Message;
-            }
 
-            await SendResult(task.TaskId, result, error);
-        }
-
-        private async Task SendResult(string taskId, object result, string error)
-        {
-            string json = JsonConvert.SerializeObject(new { task_id = taskId, result, error });
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-            await _client.PostAsync($"{_baseUrl}/api/result/{taskId}", content);
+            return result;
         }
 
         private PlanarSketch GetOrCreateSketchOnXY()
@@ -1405,14 +1494,15 @@ namespace InventorMCPBridge.Services
         {
             var compDef = GetPartCompDef();
 
-            // Parse sketch names (accepts JArray or comma-separated string)
+            // Parse sketch names (accepts JSON array or comma-separated string)
             var sketchNames = new List<string>();
             if (payload != null && payload.ContainsKey("sketches"))
             {
                 var val = payload["sketches"];
-                if (val is Newtonsoft.Json.Linq.JArray arr)
+                if (val is List<object> arr)
                 {
-                    foreach (var item in arr) sketchNames.Add(item.ToString());
+                    foreach (var item in arr)
+                        if (item != null) sketchNames.Add(item.ToString());
                 }
                 else
                 {
@@ -1534,7 +1624,7 @@ namespace InventorMCPBridge.Services
         private List<int> ParseIntList(object val)
         {
             var result = new List<int>();
-            if (val is Newtonsoft.Json.Linq.JArray arr)
+            if (val is List<object> arr)
             {
                 foreach (var item in arr) result.Add(Convert.ToInt32(item));
             }
@@ -2826,17 +2916,5 @@ namespace InventorMCPBridge.Services
                 BOMItems     = items
             };
         }
-    }
-
-    public class McpTask
-    {
-        [JsonProperty("task_id")]
-        public string TaskId { get; set; }
-
-        [JsonProperty("command")]
-        public string Command { get; set; }
-
-        [JsonProperty("payload")]
-        public Dictionary<string, object> Payload { get; set; }
     }
 }

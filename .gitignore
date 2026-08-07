@@ -1,7 +1,11 @@
 # Python
-mcp_server/__pycache__/
+**/__pycache__/
 mcp_server/venv/
 mcp_server/.env
+
+# PyInstaller (inventor-mcp.spec sí se versiona: es la receta del build)
+mcp_server/build/
+mcp_server/dist/
 
 # .NET
 **/bin/

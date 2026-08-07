@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>PipeHost</AssemblyName>
+    <RootNamespace>PipeHost</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\inventor_plugin\InventorMCPBridge.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Autodesk.Inventor.Interop">
+      <HintPath>..\..\lib\Autodesk.Inventor.Interop.dll</HintPath>
+      <EmbedInteropTypes>False</EmbedInteropTypes>
+      <Private>True</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

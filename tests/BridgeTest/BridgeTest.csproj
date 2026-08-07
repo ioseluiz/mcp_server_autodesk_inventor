@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>BridgeTest</AssemblyName>
+    <RootNamespace>BridgeTest</RootNamespace>
+  </PropertyGroup>
+
+  <!-- JsonPayload es internal: se compila dentro de la prueba para poder ejercitarlo
+       directamente, además de a través del pipe. -->
+  <ItemGroup>
+    <Compile Include="..\..\inventor_plugin\Services\JsonPayload.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\inventor_plugin\InventorMCPBridge.csproj" />
+  </ItemGroup>
+
+  <!-- El add-in referencia el interop con Private=False porque lo provee Inventor. Aquí
+       sí hay que copiarlo al output: cargar el tipo BridgeService obliga al CLR a
+       resolver Autodesk.Inventor.Interop. -->
+  <ItemGroup>
+    <Reference Include="Autodesk.Inventor.Interop">
+      <HintPath>..\..\lib\Autodesk.Inventor.Interop.dll</HintPath>
+      <EmbedInteropTypes>False</EmbedInteropTypes>
+      <Private>True</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

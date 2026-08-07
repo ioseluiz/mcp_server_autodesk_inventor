@@ -8,6 +8,12 @@
   <LoadOnStartUp>1</LoadOnStartUp>
   <UserUnloadable>1</UserUnloadable>
   <Hidden>0</Hidden>
-  <SupportedSoftwareVersionGreaterThan>27..</SupportedSoftwareVersionGreaterThan>
+  <OSType>Win64</OSType>
+  <!-- 29.. = Inventor 2026 y superior. El add-in es .NET 8, por lo que no puede cargarse
+       en Inventor 2024 o anterior (host con CLR .NET Framework 4.8). -->
+  <SupportedSoftwareVersionGreaterThan>29..</SupportedSoftwareVersionGreaterThan>
+  <!-- Al pasar a Inventor 2027, descomentar para usar su aislamiento de ensamblados nativo:
+  <UseInventorAssemblyContext>0</UseInventorAssemblyContext>
+  -->
   <DataVersion>1</DataVersion>
 </Addin>

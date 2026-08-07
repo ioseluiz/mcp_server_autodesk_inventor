@@ -1,0 +1,6 @@
+# Solo para empaquetar el servidor en inventor-mcp.exe. No es una dependencia de
+# ejecución: no instalar esto en las máquinas de usuario.
+#
+#   pip install -r requirements.txt -r requirements-build.txt
+#   pyinstaller inventor-mcp.spec
+pyinstaller==6.21.0
